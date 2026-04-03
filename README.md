@@ -86,7 +86,7 @@ Single submit-reap produces `#Iso=0` in the host controller. The DAC needs multi
 ### 5️⃣ Kernel driver race condition
 `snd-usb-audio` binds ~3ms after USB connect, before any Android intent fires. It configures the DAC to 384kHz. Our SET_CUR must target the correct clock entity to override this.
 
-> 📖 Full investigation: [`study-case/DRIVER INITIAL DOCUMENTATION/`](study-case/DRIVER%20INITIAL%20DOCUMENTATION/)
+> 📖 Full investigation: [`docs/driver/`](docs/driver/)
 
 ---
 
@@ -107,17 +107,17 @@ The goal is to build a standalone music player from scratch with a UI that doesn
 
 | # | Document | What's inside |
 |---|----------|---------------|
-| 📋 | [Executive Summary](study-case/DRIVER%20INITIAL%20DOCUMENTATION/01_EXECUTIVE_SUMMARY.md) | What we built and why it matters |
-| 🗺️ | [Investigation Journey](study-case/DRIVER%20INITIAL%20DOCUMENTATION/02_INVESTIGATION_JOURNEY.md) | The full story — every dead end and breakthrough |
-| 🏗️ | [Technical Architecture](study-case/DRIVER%20INITIAL%20DOCUMENTATION/03_TECHNICAL_ARCHITECTURE.md) | Data flow, components, USB protocol details |
-| 🐛 | [Five Critical Bugs](study-case/DRIVER%20INITIAL%20DOCUMENTATION/04_FIVE_CRITICAL_BUGS.md) | Each bug that caused silence — and the fix |
-| 🔧 | [Cayin RU7 Reference](study-case/DRIVER%20INITIAL%20DOCUMENTATION/05_CAYIN_RU7_HARDWARE_REFERENCE.md) | Complete hardware analysis with raw USB descriptors |
-| 🕵️ | [(removed) Analysis](study-case/DRIVER%20INITIAL%20DOCUMENTATION/06_(removed)_REVERSE_ENGINEERING.md) | How USB Audio Player Pro works under the hood |
-| ✅ | [Verification Guide](study-case/DRIVER%20INITIAL%20DOCUMENTATION/07_VERIFICATION_AND_DIAGNOSTICS.md) | How to prove bit-perfect is actually happening |
-| 🧬 | [Descriptor Parsing](study-case/DRIVER%20INITIAL%20DOCUMENTATION/08_USB_DESCRIPTOR_PARSING.md) | Auto-detecting DAC capabilities from USB descriptors |
-| 🔮 | [Future Work](study-case/DRIVER%20INITIAL%20DOCUMENTATION/09_FUTURE_WORK.md) | Known limitations and roadmap |
-| 📱 | [Samsung Specifics](study-case/DRIVER%20INITIAL%20DOCUMENTATION/10_SAMSUNG_S26_ULTRA_SPECIFICS.md) | UHQA, Qualcomm PAL, kernel race condition |
-| 📦 | [Library Architecture](study-case/DRIVER%20INITIAL%20DOCUMENTATION/11_STANDALONE_LIBRARY_ARCHITECTURE.md) | How to package the driver for any Android app |
+| 📋 | [Executive Summary](docs/driver/01-executive-summary.md) | What we built and why it matters |
+| 🗺️ | [Investigation Journey](docs/driver/02-investigation-journey.md) | The full story — every dead end and breakthrough |
+| 🏗️ | [Technical Architecture](docs/driver/03-technical-architecture.md) | Data flow, components, USB protocol details |
+| 🐛 | [Five Critical Bugs](docs/driver/04-five-critical-bugs.md) | Each bug that caused silence — and the fix |
+| 🔧 | [Cayin RU7 Reference](docs/driver/05-cayin-ru7-hardware-reference.md) | Complete hardware analysis with raw USB descriptors |
+| 🕵️ | [(removed) Analysis](docs/driver/06-uapp-reverse-engineering.md) | How USB Audio Player Pro works under the hood |
+| ✅ | [Verification Guide](docs/driver/07-verification-and-diagnostics.md) | How to prove bit-perfect is actually happening |
+| 🧬 | [Descriptor Parsing](docs/driver/08-usb-descriptor-parsing.md) | Auto-detecting DAC capabilities from USB descriptors |
+| 🔮 | [Future Work](docs/driver/09-future-work.md) | Known limitations and roadmap |
+| 📱 | [Samsung Specifics](docs/driver/10-samsung-s26-ultra-specifics.md) | UHQA, Qualcomm PAL, kernel race condition |
+| 📦 | [Library Architecture](docs/driver/11-standalone-library-architecture.md) | How to package the driver for any Android app |
 
 ---
 
@@ -125,7 +125,7 @@ The goal is to build a standalone music player from scratch with a UI that doesn
 
 The USB audio driver is original work — not derived from any existing project.
 
-The proof-of-concept was developed inside a fork of [Felicity Music Player](https://github.com/Hamza417/Felicity) (AGPL v3). The final decent-player app will be built from scratch.
+The proof-of-concept was developed inside a fork of [Felicity Music Player](https://github.com/Hamza417/Felicity) (AGPL v3) by [Hamza417](https://github.com/Hamza417). The final decent-player app will be built from scratch.
 
 ---
 
