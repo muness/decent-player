@@ -2,7 +2,7 @@
 
 **Achievement:** First open-source bit-perfect USB audio driver for Android.
 **Date:** 2026-04-03
-**Status:** Working on Samsung S26 Ultra + iBasso DX340 with Cayin RU7 DAC.
+**Status:** Working on Samsung S26 Ultra/iBasso DX340 with Cayin RU7 DAC.
 
 ## Documents
 
