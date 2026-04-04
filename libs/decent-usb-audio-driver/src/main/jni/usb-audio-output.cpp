@@ -146,8 +146,25 @@ static int submitIsoUrb(int fd, int ep, uint8_t *data, const int *pktSizes, int 
  */
 static int reapOneUrb(int fd) {
     struct usbdevfs_urb *c = nullptr;
-    int ret = ioctl(fd, USBDEVFS_REAPURB, &c);
-    if (ret < 0) return -1;
+
+    // Use non-blocking reap with retry to avoid infinite hang.
+    // The xHCI host controller sometimes stops processing URBs after
+    // multiple close/reopen cycles, causing blocking REAPURB to hang forever.
+    for (int attempt = 0; attempt < 200; attempt++) {  // 200 * 1ms = 200ms max
+        int ret = ioctl(fd, USBDEVFS_REAPURBNDELAY, &c);
+        if (ret == 0 && c != nullptr) {
+            goto found;
+        }
+        if (ret < 0 && errno != EAGAIN) {
+            return -1;  // real error (ENODEV etc)
+        }
+        usleep(1000);  // 1ms
+    }
+    LOGE("reapOneUrb: timed out after 200ms — URBs stuck in xHCI");
+    return -2;  // timeout — distinct from error
+
+    found:
+    int ret = 0;
 
     // Find and free using our tracked pointers, not the kernel-returned ones
     for (int i = 0; i < trackedCount; i++) {
@@ -226,10 +243,12 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStart(
         else LOGW("Start: feedback not responding");
     }
 
-    // Pre-fill pipeline with silence URBs (fire and forget — no reap)
+    // No silence pre-fill. Pipeline fills naturally with real data.
+    // Silence pre-fill at old rate interferes with xHCI rate transitions.
+    int preFillCount = 0;
     double fpmf = ctx->sampleRate / 8000.0;
     double acc = 0.0;
-    for (int u = 0; u < USB_AUDIO_NUM_URBS; u++) {
+    for (int u = 0; u < preFillCount; u++) {
         int pktSizes[USB_AUDIO_MAX_PACKETS_PER_URB];
         int pkts = 0, bytes = 0;
         for (int p = 0; p < USB_AUDIO_MAX_PACKETS_PER_URB; p++) {
@@ -313,7 +332,37 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
 
         // Reap one old URB before submitting new one (maintain pipeline depth)
         if (ctx->urbsInFlight >= USB_AUDIO_NUM_URBS) {
-            if (reapOneUrb(ctx->fd) == 0) ctx->urbsInFlight--;
+            static int reapInWriteCount = 0;
+            reapInWriteCount++;
+            if (reapInWriteCount <= 20 || reapInWriteCount % 500 == 0) {
+                LOGI("nativeUsbAudioWrite: about to reap, inflight=%d tracked=%d call#%d",
+                     ctx->urbsInFlight, trackedCount, reapInWriteCount);
+            }
+            int reapResult = reapOneUrb(ctx->fd);
+            if (reapResult == 0) {
+                ctx->urbsInFlight--;
+            } else if (reapResult == -2) {
+                // URBs stuck in xHCI — discard all tracked URBs and stop
+                LOGE("nativeUsbAudioWrite: xHCI stuck, discarding %d URBs", trackedCount);
+                for (int i = 0; i < trackedCount; i++) {
+                    ioctl(ctx->fd, USBDEVFS_DISCARDURB, trackedUrbs[i].urb);
+                }
+                // Reap the discarded URBs (they return immediately with error)
+                for (int i = 0; i < trackedCount; i++) {
+                    struct usbdevfs_urb *disc = nullptr;
+                    ioctl(ctx->fd, USBDEVFS_REAPURBNDELAY, &disc);
+                    if (disc) { free(trackedUrbs[i].buffer); free(trackedUrbs[i].urb); }
+                }
+                trackedCount = 0;
+                ctx->urbsInFlight = 0;
+                free(buf);
+                ctx->running.store(false);
+                return;
+            } else {
+                free(buf);
+                ctx->running.store(false);
+                return;
+            }
         }
 
         if (submitIsoUrb(ctx->fd, ctx->endpointOut, buf, pktSizes, pkts) < 0) {
@@ -354,14 +403,18 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioDestroy(
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return;
     ctx->running.store(false);
+
+    // Drain URBs with timeout-based reap
     while (ctx->urbsInFlight > 0) {
         if (reapOneUrb(ctx->fd) < 0) break;
         ctx->urbsInFlight--;
     }
-    if (ctx->interfaceClaimed) {
-        setAlternateSetting(ctx->fd, ctx->interfaceId, 0);
-        releaseInterface(ctx->fd, ctx->interfaceId);
-    }
+    LOGI("Destroy: drained to %d URBs remaining", ctx->urbsInFlight);
+
+    // Do NOT setAltSetting or releaseInterface from native code.
+    // The Java layer handles setAltSetting(0) via UsbDeviceConnection.setInterface()
+    // which properly triggers the xHCI Configure Endpoint Command to free/alloc
+    // the isochronous ring. Native USBDEVFS_SETINTERFACE does NOT do this correctly.
     // Free any remaining tracked URBs that weren't reaped
     for (int i = 0; i < trackedCount; i++) {
         free(trackedUrbs[i].buffer);
@@ -372,6 +425,14 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioDestroy(
     free(ctx->transferBuffer);
     LOGI("Destroy: %lld frames total", (long long)ctx->framesWritten);
     delete ctx;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_decent_usbaudio_UsbAudioStream_nativeIsRunning(
+        JNIEnv *, jobject, jlong h) {
+    auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
+    if (!ctx) return JNI_FALSE;
+    return ctx->running.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL

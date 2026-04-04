@@ -224,7 +224,7 @@ class AaudioAudioSink(
          * natural backpressure matching the DAC's clock rate.
          */
         val usbStream = usbAudioStream
-        if (AudioPreferences.isBitPerfectUsbEnabled() && usbStream?.isReady == true) {
+        if (AudioPreferences.isBitPerfectUsbEnabled() && usbStream?.isAlive == true) {
             muteDelegateIfNeeded()
             val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
             // Feed the delegate (muted) so ExoPlayer's clock and state machine work
@@ -459,7 +459,7 @@ class AaudioAudioSink(
 
         // If USB stream already matches, don't recreate (avoids releasing the interface)
         if (sampleRate == currentSampleRate && channelCount == currentChannelCount
-            && usbAudioStream?.isReady == true) {
+            && usbAudioStream?.isAlive == true) {
             Log.d(TAG, "USB stream already configured for rate=$sampleRate ch=$channelCount — keeping it")
             return
         }
@@ -533,15 +533,27 @@ class AaudioAudioSink(
          * allocate bandwidth — confirmed via /sys/kernel/debug/usb/devices
          * showing #Iso=0 when using native-only.
          */
-        usbAudioManager.setAltSetting(0)  // Java — deselect
-        Thread.sleep(10)
+        // (removed) transition sequence (from xHCI ftrace on iBasso):
+        // 1. Native Destroy already drained all URBs
+        // 2. Wait 200ms for xHCI to finish processing drained URBs
+        // 3. setAlt(0) via Java — xHCI Configure Endpoint Command frees old ISO ring
+        // 4. SET_CUR sample rate
+        // 5. setAlt(3) via Java — xHCI Configure Endpoint Command allocs new ISO ring
+        // 6. Wait 50ms for new endpoint to be ready
+
+        Thread.sleep(200)  // Let drained URBs fully complete in xHCI
+
+        usbAudioManager.setAltSetting(0)  // Frees old ISO ring
+        Thread.sleep(50)
+
         usbAudioManager.setSampleRate(sampleRate)
         Thread.sleep(50)
 
         val actualRate = usbAudioManager.readSampleRate()
         Log.i(TAG, "DAC reports sample rate: $actualRate Hz (requested: $sampleRate Hz)")
 
-        val altResult = usbAudioManager.setAltSetting(altSetting)  // Java — allocates ISO bandwidth!
+        val altResult = usbAudioManager.setAltSetting(altSetting)  // Allocs new ISO ring
+        Thread.sleep(50)
         Log.i(TAG, "Java setAltSetting($altSetting): $altResult")
 
         if (!stream.start()) {
@@ -582,14 +594,17 @@ class AaudioAudioSink(
         stream.write(floatBuf)
     }
 
-    /** Releases the USB audio stream and closes the USB device. */
+    /** Releases the USB audio stream. Device connection stays open. */
     private fun releaseUsbStream() {
-        usbAudioStream?.release()
+        usbAudioStream?.release()  // native Destroy: drains URBs, setAlt(0)
         usbAudioStream = null
-        usbAudioManager.closeDevice()
+        // NEVER close the device connection between tracks.
+        // Closing/reopening corrupts the xHCI endpoint state after ~3 cycles.
+        // The (removed) approach: keep the same UsbDeviceConnection forever,
+        // and use setAlt(0)→SET_CUR→setAlt(N) to change rate on the same fd.
         clearForcedRouting()
         unmuteDelegateIfNeeded()
-        Log.i(TAG, "USB audio stream released")
+        Log.i(TAG, "USB audio stream released (device kept open)")
     }
 
     companion object {

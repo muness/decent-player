@@ -55,9 +55,13 @@ class UsbAudioStream(
         }
     }
 
-    /** True when the native context exists and the stream hasn't fatally errored. */
+    /** True when the native context was created successfully. */
     val isReady: Boolean
         get() = nativeHandle != 0L
+
+    /** True when the stream is actively running (after start, before stop/error). */
+    val isAlive: Boolean
+        get() = nativeHandle != 0L && nativeIsRunning(nativeHandle)
 
     /**
      * Select alternate setting on the USB streaming interface.
@@ -136,6 +140,7 @@ class UsbAudioStream(
     private external fun nativeUsbAudioWrite(handle: Long, pcmBuffer: FloatArray)
     private external fun nativeUsbAudioStop(handle: Long)
     private external fun nativeUsbAudioDestroy(handle: Long)
+    private external fun nativeIsRunning(handle: Long): Boolean
 
     companion object {
         private const val TAG = "UsbAudioStream"
