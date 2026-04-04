@@ -504,57 +504,37 @@ class AaudioAudioSink(
         }
 
         /**
-         * UAC2 correct sequence:
-         * 1. Ensure alt setting 0 (zero-bandwidth) — stops any active streaming
-         * 2. SET_CUR sample rate on the Clock Source entity
-         * 3. Set the desired alt setting (activates streaming at the new rate)
-         *
-         * Setting sample rate while a non-zero alt setting is active is ignored
-         * by most DACs.
+         * UAC2 transition: alt=0 -> SET_CUR -> alt=N
+         * CRITICAL: setAlt() MUST use Java UsbDeviceConnection.setInterface()
+         * because only the Java path triggers the xHCI Configure Endpoint
+         * Command that properly frees/allocs the isochronous ring.
          */
-        /**
-         * UAC2 sequence to reliably change sample rate:
-         * 1. alt=0 (stop streaming, release bandwidth)
-         * 2. SET_CUR sample rate (configure clock while stopped)
-         * 3. alt=0 again (ensure clean state after SET_CUR)
-         * 4. SET_CUR again (some DACs need it repeated after interface reset)
-         * 5. alt=N (activate streaming with new rate + bandwidth allocation)
-         */
-        /**
-         * UAC2 init: alt=0 → SET_CUR → alt=N
-         * Use NATIVE ioctl for setInterface (not Java) to match the native claim
-         * state after USBDEVFS_RESET. Java setInterface may use a stale connection.
-         */
-        /**
-         * UAC2 init: alt=0 → SET_CUR → alt=N
-         * CRITICAL: The final alt=N MUST use Java setInterface() because
-         * only the Java path properly allocates isochronous bandwidth in
-         * the xHCI host controller. Native USBDEVFS_SETINTERFACE does NOT
-         * allocate bandwidth — confirmed via /sys/kernel/debug/usb/devices
-         * showing #Iso=0 when using native-only.
-         */
-        // (removed) transition sequence (from xHCI ftrace on iBasso):
-        // 1. Native Destroy already drained all URBs
-        // 2. Wait 200ms for xHCI to finish processing drained URBs
-        // 3. setAlt(0) via Java — xHCI Configure Endpoint Command frees old ISO ring
-        // 4. SET_CUR sample rate
-        // 5. setAlt(3) via Java — xHCI Configure Endpoint Command allocs new ISO ring
-        // 6. Wait 50ms for new endpoint to be ready
-
-        Thread.sleep(200)  // Let drained URBs fully complete in xHCI
+        // (removed) transition sequence (from xHCI ftrace on iBasso DX340):
+        //
+        // Previous stream was already drained via releaseUsbStream():
+        //   stop() -> drainUrbs() -> release()
+        // All URBs are guaranteed to be reaped at this point.
+        //
+        // Now the safe xHCI reconfiguration sequence:
+        // 1. setAlt(0) via Java — Configure Endpoint Command FREES old ISO ring
+        // 2. SET_CUR sample rate on Clock Source entity
+        // 3. setAlt(N) via Java — Configure Endpoint Command ALLOCS new ISO ring
+        // 4. Brief pause for new endpoint to stabilize
 
         usbAudioManager.setAltSetting(0)  // Frees old ISO ring
-        Thread.sleep(50)
+        Log.i(TAG, "setAlt(0): old ISO ring freed")
 
         usbAudioManager.setSampleRate(sampleRate)
-        Thread.sleep(50)
 
         val actualRate = usbAudioManager.readSampleRate()
         Log.i(TAG, "DAC reports sample rate: $actualRate Hz (requested: $sampleRate Hz)")
 
         val altResult = usbAudioManager.setAltSetting(altSetting)  // Allocs new ISO ring
+        Log.i(TAG, "setAlt($altSetting): $altResult — new ISO ring allocated")
+
+        // Brief pause for xHCI endpoint to stabilize after ring allocation
+        // (removed) shows ~47ms between Configure Endpoint and first URB submission
         Thread.sleep(50)
-        Log.i(TAG, "Java setAltSetting($altSetting): $altResult")
 
         if (!stream.start()) {
             Log.e(TAG, "USB stream start failed")
@@ -594,14 +574,35 @@ class AaudioAudioSink(
         stream.write(floatBuf)
     }
 
-    /** Releases the USB audio stream. Device connection stays open. */
+    /**
+     * Releases the USB audio stream with proper reference-impl-style drain sequence.
+     *
+     * The critical insight from xHCI ftrace analysis of (removed):
+     * ALL in-flight URBs must be drained BEFORE calling setAlt(0).
+     * The xHCI Configure Endpoint Command triggered by setAlt(0) frees
+     * the isochronous ring — if URBs are still pending, the host
+     * controller state becomes corrupted and subsequent transfers fail.
+     *
+     * Sequence: stop() -> drainUrbs() -> release() -> (Kotlin does setAlt(0))
+     */
     private fun releaseUsbStream() {
-        usbAudioStream?.release()  // native Destroy: drains URBs, setAlt(0)
+        val stream = usbAudioStream ?: return
         usbAudioStream = null
+
+        // 1. Stop accepting new writes
+        stream.stop()
+
+        // 2. Drain ALL in-flight URBs (blocking) — MUST complete before setAlt(0)
+        val drained = stream.drainUrbs()
+        Log.i(TAG, "USB stream drained $drained URBs")
+
+        // 3. Release native context
+        stream.release()
+
         // NEVER close the device connection between tracks.
         // Closing/reopening corrupts the xHCI endpoint state after ~3 cycles.
         // The (removed) approach: keep the same UsbDeviceConnection forever,
-        // and use setAlt(0)→SET_CUR→setAlt(N) to change rate on the same fd.
+        // and use setAlt(0)->SET_CUR->setAlt(N) to change rate on the same fd.
         clearForcedRouting()
         unmuteDelegateIfNeeded()
         Log.i(TAG, "USB audio stream released (device kept open)")

@@ -10,15 +10,18 @@ import android.util.Log
  * DAC via Linux usbdevfs isochronous transfers, bypassing the entire Android
  * audio stack (AudioFlinger, AudioTrack, AAudio).
  *
- * Lifecycle:
+ * Pipeline: 64 URBs in flight, each carrying 8 ISO packets (1ms of audio).
+ * Total pipeline buffer: ~64ms.
+ *
+ * Rate transition lifecycle (matches (removed) xHCI behavior):
  * ```
- * UsbAudioStream(fd, iface, ep, ...)
- *     .setAltSetting(1)        // select format (bit depth)
- *     .setSampleRate(44100, 41) // configure DAC clock
- *     .start()
- *     .write(floatPcm)         // audio thread
- *     .stop()
- *     .release()
+ * stream.stop()           // stop accepting writes
+ * stream.drainUrbs()      // block until ALL in-flight URBs complete
+ * stream.release()        // free native context
+ * // Kotlin layer does: setAlt(0) -> SET_CUR rate -> setAlt(N)
+ * newStream = UsbAudioStream(fd, ...)
+ * newStream.start()
+ * newStream.write(pcm)    // pipeline fills naturally
  * ```
  *
  * @param fd               File descriptor from [android.hardware.usb.UsbDeviceConnection.getFileDescriptor]
@@ -29,8 +32,6 @@ import android.util.Log
  * @param channelCount     Number of channels (1=mono, 2=stereo)
  * @param bitDepth         Bits per sample (16, 24, or 32)
  * @param maxPacketSize    Max packet size from endpoint descriptor
- *
- * @author DecentPlayer project
  */
 class UsbAudioStream(
         fd: Int,
@@ -89,7 +90,8 @@ class UsbAudioStream(
     }
 
     /**
-     * Start the USB audio stream.
+     * Start the USB audio stream. The pipeline fills naturally with
+     * data from subsequent [write] calls.
      */
     fun start(): Boolean {
         if (nativeHandle == 0L) return false
@@ -99,8 +101,10 @@ class UsbAudioStream(
     /**
      * Write interleaved float32 PCM to the USB DAC.
      *
-     * The native layer converts to the target bit depth and sends via
-     * isochronous USB transfer. This call blocks until the transfer completes.
+     * The native layer converts to the target bit depth, splits into
+     * 1ms URBs (8 ISO packets each), and manages the 64-URB pipeline.
+     * This call blocks when the pipeline is full (natural backpressure
+     * matching the DAC's clock rate).
      *
      * @param pcmBuffer Interleaved float PCM; length = frameCount * channelCount
      */
@@ -110,11 +114,27 @@ class UsbAudioStream(
     }
 
     /**
-     * Stop the USB audio stream.
+     * Stop accepting new writes. Does NOT drain the pipeline.
+     * Call [drainUrbs] after this to wait for all in-flight URBs to complete.
      */
     fun stop() {
         if (nativeHandle == 0L) return
         nativeUsbAudioStop(nativeHandle)
+    }
+
+    /**
+     * Drain all in-flight URBs. Blocks until every URB is reaped.
+     *
+     * This MUST be called after [stop] and BEFORE the Kotlin layer calls
+     * setAlt(0) on the USB device. The xHCI Configure Endpoint Command
+     * triggered by setAlt(0) frees the isochronous ring — if any URBs
+     * are still in the ring, the host controller state becomes corrupted.
+     *
+     * @return Number of URBs successfully drained
+     */
+    fun drainUrbs(): Int {
+        if (nativeHandle == 0L) return 0
+        return nativeDrainUrbs(nativeHandle)
     }
 
     /**
@@ -139,6 +159,7 @@ class UsbAudioStream(
     private external fun nativeUsbAudioStart(handle: Long): Boolean
     private external fun nativeUsbAudioWrite(handle: Long, pcmBuffer: FloatArray)
     private external fun nativeUsbAudioStop(handle: Long)
+    private external fun nativeDrainUrbs(handle: Long): Int
     private external fun nativeUsbAudioDestroy(handle: Long)
     private external fun nativeIsRunning(handle: Long): Boolean
 
