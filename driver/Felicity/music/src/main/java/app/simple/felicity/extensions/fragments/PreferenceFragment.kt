@@ -674,7 +674,7 @@ abstract class PreferenceFragment : MediaFragment() {
                     AudioPreferences.setBitPerfectUsbEnabled(enabled)
                     if (enabled) {
                         // Try to request USB permission now if a device is connected
-                        val usbMgr = app.simple.felicity.engine.audio.UsbAudioManager.getInstance(requireContext())
+                        val usbMgr = com.decent.usbaudio.UsbAudioDevice.getInstance(requireContext())
                         val device = usbMgr.findUsbAudioDevice()
                         if (device != null && !usbMgr.hasPermission(device)) {
                             usbMgr.requestPermission(device) { granted ->

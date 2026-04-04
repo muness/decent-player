@@ -4,14 +4,12 @@ import android.app.SearchManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.MediaStore
 import android.util.Log
-import app.simple.felicity.engine.audio.UsbAudioManager
 import app.simple.felicity.preferences.AudioPreferences
+import com.decent.usbaudio.UsbAudioPermissionHelper
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.viewModels
@@ -378,39 +376,8 @@ class MainActivity : BaseActivity(), MiniPlayerCallbacks {
      * a window to claim the device exclusively for bit-perfect audio output.
      */
     private fun handleUsbDeviceAttached(intent: Intent) {
-        if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
-
-        val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
-        Log.i(TAG, "USB_DEVICE_ATTACHED: ${device.productName} " +
-                "(vendor=0x${device.vendorId.toString(16)}, product=0x${device.productId.toString(16)})")
-
-        if (!AudioPreferences.isBitPerfectUsbEnabled()) {
-            Log.i(TAG, "Bit-perfect USB not enabled, ignoring USB device")
-            return
-        }
-
-        // Use the device from the intent directly — it already has permission
-        // granted by the USB_DEVICE_ATTACHED system (user chose our app).
-        // Claim ASAP with minimal work to beat snd-usb-audio.
-        val usbMgr = UsbAudioManager.getInstance(applicationContext)
-        val usbSysManager = getSystemService(USB_SERVICE) as android.hardware.usb.UsbManager
-
-        if (usbSysManager.hasPermission(device)) {
-            val info = usbMgr.openDevice(device)
-            if (info != null) {
-                Log.i(TAG, "USB Audio device claimed on ATTACHED: ${info.deviceName} fd=${info.fd}")
-            } else {
-                Log.e(TAG, "Failed to open USB audio device on ATTACHED")
-            }
-        } else {
-            Log.w(TAG, "No permission in ATTACHED intent — requesting")
-            usbMgr.requestPermission(device) { granted ->
-                if (granted) {
-                    val info = usbMgr.openDevice(device)
-                    Log.i(TAG, "USB permission granted, device claimed: ${info?.deviceName}")
-                }
-            }
-        }
+        if (!AudioPreferences.isBitPerfectUsbEnabled()) return
+        UsbAudioPermissionHelper.handleIntent(applicationContext, intent)
     }
 
     private fun handleSearchIntent(intent: Intent) {

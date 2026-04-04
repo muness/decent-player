@@ -16,6 +16,13 @@ dependencyResolutionManagement {
         maven { url "https://jitpack.io" }
     }
 }
+// Include the decent-usb-audio libs as composite builds
+includeBuild('../../libs') {
+    dependencySubstitution {
+        substitute module('com.decent:usb-audio-driver') using project(':decent-usb-audio-driver')
+    }
+}
+
 rootProject.name = "Felicity"
 include ':music'
 include ':theme'

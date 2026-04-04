@@ -1,5 +1,6 @@
 package app.simple.felicity.engine.utils
 
+import app.simple.felicity.preferences.AudioPreferences
 import app.simple.felicity.repository.models.Audio
 
 /**
@@ -29,6 +30,11 @@ object PcmInfoFormatter {
      */
     fun formatPcmInfo(audio: Audio): String {
         return buildString {
+            if (AudioPreferences.isBitPerfectUsbEnabled()) {
+                append("BIT-PERFECT")
+                append(" ")
+            }
+
             if (audio.bitPerSample > 0) {
                 append("${audio.bitPerSample}bit")
             }

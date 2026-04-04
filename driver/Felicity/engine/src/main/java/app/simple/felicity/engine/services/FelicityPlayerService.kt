@@ -1171,8 +1171,12 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // If HW resampling happens, the chain ends at the hardware's forced rate. Otherwise, it ends at the DSP rate.
         val effectiveOutRate = if (hwResampling) deviceSampleRate else dspSampleRateHz
 
-        // Reflect the active output API in the snapshot so the pipeline dialog can show it.
-        val audioOutputMode = if (AudioPreferences.isAaudioEnabled()) "AAudio (Low Latency)" else "AudioTrack"
+        // Reflect the active output API in the snapshot
+        val audioOutputMode = when {
+            AudioPreferences.isBitPerfectUsbEnabled() -> "USB Bit-Perfect"
+            AudioPreferences.isAaudioEnabled() -> "AAudio (Low Latency)"
+            else -> "AudioTrack"
+        }
 
         val snapshot = AudioPipelineSnapshot(
                 trackFormat = trackFormat,

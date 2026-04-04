@@ -138,56 +138,72 @@ class AudioPipelineDialog : ScopedBottomSheetFragment() {
                 getString(R.string.decoder_name),
                 snapshot.decoderName.ifBlank { "—" })
 
-        // Resampler — I/O rates are merged into one value using a format string
-        val inRateStr = if (snapshot.effectiveInputSampleRate > 0) getString(R.string.format_hz, snapshot.effectiveInputSampleRate) else "—"
-        val outRateStr = if (snapshot.effectiveOutputSampleRate > 0) getString(R.string.format_hz, snapshot.effectiveOutputSampleRate) else "—"
+        val isBitPerfect = snapshot.audioOutputMode == "USB Bit-Perfect"
 
-        b.valueResamplerRates.text = createSpannedString(
-                getString(R.string.io_rate),
-                getString(R.string.format_io_rate, inRateStr, outRateStr)
-        )
+        if (isBitPerfect) {
+            // In bit-perfect mode, resampler and DSP are completely bypassed
+            b.valueResamplerRates.text = createSpannedString(
+                    getString(R.string.io_rate), "Bypassed")
+            b.valueResamplerType.text = createSpannedString(
+                    getString(R.string.resampler_type), "None (Bit-Perfect)")
+            b.valueResamplerCutoff.text = createSpannedString(
+                    getString(R.string.resampler_cutoff), "—")
+            b.valueResamplerQuality.text = createSpannedString(
+                    getString(R.string.quality), "Bit-Perfect")
 
-        b.valueResamplerType.text = createSpannedString(
-                getString(R.string.resampler_type),
-                snapshot.resamplerType)
+            b.valueDspFormat.text = createSpannedString(
+                    getString(R.string.pcm_format), "Bypassed")
+            b.valueDspSampleRate.text = createSpannedString(
+                    getString(R.string.sample_rate),
+                    if (snapshot.sampleRateHz > 0) getString(R.string.format_hz, snapshot.sampleRateHz) else "—")
+            b.valueEqPreset.text = createSpannedString(
+                    getString(R.string.eq_preset), "Bypassed")
+            b.valueStereoExpand.text = createSpannedString(
+                    getString(R.string.stereo_expand), "Bypassed")
+            b.valueBuffers.text = createSpannedString(
+                    getString(R.string.buffers), "USB Isochronous (8 URBs)")
+            b.valueLatency.text = createSpannedString(
+                    getString(R.string.latency), "Direct to DAC")
+        } else {
+            // Normal mode — show resampler and DSP state
+            val inRateStr = if (snapshot.effectiveInputSampleRate > 0) getString(R.string.format_hz, snapshot.effectiveInputSampleRate) else "—"
+            val outRateStr = if (snapshot.effectiveOutputSampleRate > 0) getString(R.string.format_hz, snapshot.effectiveOutputSampleRate) else "—"
 
-        b.valueResamplerCutoff.text = createSpannedString(
-                getString(R.string.resampler_cutoff),
-                if (snapshot.resamplerCutoffHz > 0) {
-                    val cutOffPercent: Int = snapshot.resamplerCutoffHz * 100 / snapshot.inputSampleRate
-                    getString(R.string.format_hz_cutoff, snapshot.resamplerCutoffHz, cutOffPercent)
-                } else {
-                    "—"
-                })
+            b.valueResamplerRates.text = createSpannedString(
+                    getString(R.string.io_rate),
+                    getString(R.string.format_io_rate, inRateStr, outRateStr))
+            b.valueResamplerType.text = createSpannedString(
+                    getString(R.string.resampler_type),
+                    snapshot.resamplerType)
+            b.valueResamplerCutoff.text = createSpannedString(
+                    getString(R.string.resampler_cutoff),
+                    if (snapshot.resamplerCutoffHz > 0) {
+                        val cutOffPercent: Int = snapshot.resamplerCutoffHz * 100 / snapshot.inputSampleRate
+                        getString(R.string.format_hz_cutoff, snapshot.resamplerCutoffHz, cutOffPercent)
+                    } else { "—" })
+            b.valueResamplerQuality.text = createSpannedString(
+                    getString(R.string.quality),
+                    snapshot.resamplerQuality)
 
-        b.valueResamplerQuality.text = createSpannedString(
-                getString(R.string.quality),
-                snapshot.resamplerQuality)
-
-        // DSP
-        b.valueDspFormat.text = createSpannedString(
-                getString(R.string.pcm_format),
-                snapshot.dspFormat.ifBlank { "—" })
-
-        b.valueDspSampleRate.text = createSpannedString(
-                getString(R.string.sample_rate),
-                if (snapshot.dspSampleRate > 0) getString(R.string.format_hz, snapshot.dspSampleRate) else "—")
-
-        b.valueEqPreset.text = createSpannedString(
-                getString(R.string.eq_preset),
-                snapshot.activeEqName ?: getString(R.string.disabled))
-
-        b.valueStereoExpand.text = createSpannedString(
-                getString(R.string.stereo_expand),
-                getString(R.string.format_percent, snapshot.stereoExpandPercent))
-
-        b.valueBuffers.text = createSpannedString(
-                getString(R.string.buffers),
-                snapshot.buffers.ifBlank { "—" })
-
-        b.valueLatency.text = createSpannedString(
-                getString(R.string.latency),
-                getString(R.string.format_approx_ms, snapshot.latencyMs))
+            b.valueDspFormat.text = createSpannedString(
+                    getString(R.string.pcm_format),
+                    snapshot.dspFormat.ifBlank { "—" })
+            b.valueDspSampleRate.text = createSpannedString(
+                    getString(R.string.sample_rate),
+                    if (snapshot.dspSampleRate > 0) getString(R.string.format_hz, snapshot.dspSampleRate) else "—")
+            b.valueEqPreset.text = createSpannedString(
+                    getString(R.string.eq_preset),
+                    snapshot.activeEqName ?: getString(R.string.disabled))
+            b.valueStereoExpand.text = createSpannedString(
+                    getString(R.string.stereo_expand),
+                    getString(R.string.format_percent, snapshot.stereoExpandPercent))
+            b.valueBuffers.text = createSpannedString(
+                    getString(R.string.buffers),
+                    snapshot.buffers.ifBlank { "—" })
+            b.valueLatency.text = createSpannedString(
+                    getString(R.string.latency),
+                    getString(R.string.format_approx_ms, snapshot.latencyMs))
+        }
 
         b.valueAudioOutputMode.text = createSpannedString(
                 getString(R.string.audio_output_mode),

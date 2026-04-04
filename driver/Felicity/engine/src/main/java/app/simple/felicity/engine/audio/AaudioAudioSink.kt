@@ -13,7 +13,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import app.simple.felicity.engine.processors.AaudioOutputProcessor
-import app.simple.felicity.engine.processors.UsbAudioOutputProcessor
+import com.decent.usbaudio.UsbAudioDevice
+import com.decent.usbaudio.UsbAudioStream
 import app.simple.felicity.engine.utils.PcmUtils
 import app.simple.felicity.preferences.AudioPreferences
 import java.nio.ByteBuffer
@@ -52,10 +53,10 @@ class AaudioAudioSink(
     private var aaudioStream: AaudioOutputProcessor? = null
 
     /** Direct USB audio stream for bit-perfect output; null when not active. */
-    private var usbAudioStream: UsbAudioOutputProcessor? = null
+    private var usbAudioStream: UsbAudioStream? = null
 
     /** Manages USB device discovery, permissions, and connection lifecycle. */
-    private val usbAudioManager = UsbAudioManager.getInstance(context)
+    private val usbAudioManager = UsbAudioDevice.getInstance(context)
 
     /** PCM encoding of the most recently configured format. */
     private var currentEncoding: Int = C.ENCODING_PCM_16BIT
@@ -485,7 +486,7 @@ class AaudioAudioSink(
                 "bits=$bitDepth alt=$altSetting device=${deviceInfo.deviceName}")
 
         // No USB reset needed — clock source ID 0x05 works correctly
-        val stream = UsbAudioOutputProcessor(
+        val stream = UsbAudioStream(
                 fd = deviceInfo.fd,
                 interfaceId = deviceInfo.interfaceId,
                 endpointOut = deviceInfo.endpointOutAddress,
@@ -563,7 +564,7 @@ class AaudioAudioSink(
      * Converts the ByteBuffer to a FloatArray (same as AAudio path) and
      * forwards to the native USB output.
      */
-    private fun writeSnapshotToUsb(snapshot: ByteBuffer, stream: UsbAudioOutputProcessor) {
+    private fun writeSnapshotToUsb(snapshot: ByteBuffer, stream: UsbAudioStream) {
         val bps = PcmUtils.bytesPerSample(currentEncoding)
         val totalSamples = snapshot.remaining() / bps
         if (totalSamples <= 0) return

@@ -18,8 +18,7 @@ FetchContent_MakeAvailable(pffft)
 add_library(felicity_audio_engine SHARED
             visualizer-fft.cpp
             dsp-engine.cpp
-            aaudio-player.cpp
-            usb-audio-output.cpp)
+            aaudio-player.cpp)
 
 # Explicitly add pffft's source root so that #include "pffft.h" resolves
 # correctly regardless of how the PFFFT::PFFFT target exposes its headers.

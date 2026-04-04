@@ -36,6 +36,9 @@ dependencies {
     implementation project(':preferences')
     implementation project(':repository')
 
+    // Bit-perfect USB audio driver (core only — AaudioAudioSink uses it directly)
+    api 'com.decent:usb-audio-driver'
+
     api "androidx.media3:media3-exoplayer:1.9.3"
     api "androidx.media3:media3-ui:1.9.3"
     api "androidx.media3:media3-common:1.9.3"

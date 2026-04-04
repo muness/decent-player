@@ -1,11 +1,10 @@
 /**
  * @file usb-audio-output.cpp
- * @brief Direct USB audio output — V4 (minimal working version)
+ * @brief Direct USB audio output via Linux usbdevfs isochronous transfers.
  *
- * Based on the version that produced sound (grunido), with sine wave
- * replaced by real ExoPlayer data. Key insight: the xHCI host controller
- * needs multiple URBs in flight (pipeline). Single submit-reap produces
- * silence because #Iso=0 between URBs.
+ * Sends PCM audio directly to a USB Audio Class 2.0 DAC, bypassing the
+ * entire Android audio stack. Maintains a pipeline of multiple URBs in
+ * flight for continuous streaming.
  */
 
 #include "usb-audio-output.h"
@@ -91,6 +90,23 @@ static double readFeedback(int fd, int ep) {
 }
 
 /**
+ * URB tracking for safe deallocation after reap.
+ * Android MTE may modify pointer tags, making direct free() on kernel-returned
+ * pointers unsafe. We track our original allocations and free those instead.
+ */
+#define MAX_TRACKED_URBS 64
+static struct { struct usbdevfs_urb *urb; void *buffer; } trackedUrbs[MAX_TRACKED_URBS];
+static int trackedCount = 0;
+
+static void trackUrb(struct usbdevfs_urb *urb, void *buffer) {
+    if (trackedCount < MAX_TRACKED_URBS) {
+        trackedUrbs[trackedCount].urb = urb;
+        trackedUrbs[trackedCount].buffer = buffer;
+        trackedCount++;
+    }
+}
+
+/**
  * Submit one ISO URB. Does NOT reap — caller manages the pipeline.
  * The data buffer is owned by the URB until reaped.
  */
@@ -107,6 +123,7 @@ static int submitIsoUrb(int fd, int ep, uint8_t *data, const int *pktSizes, int 
     u->endpoint = (unsigned char)ep;
     u->buffer = data;
     u->buffer_length = totalBytes;
+    u->usercontext = data;  // Store original pointer for safe free after reap (MTE compat)
     u->number_of_packets = numPkts;
     for (int i = 0; i < numPkts; i++)
         u->iso_frame_desc[i].length = (unsigned)pktSizes[i];
@@ -118,7 +135,8 @@ static int submitIsoUrb(int fd, int ep, uint8_t *data, const int *pktSizes, int 
         free(u);
         return -1;
     }
-    // URB now owned by kernel — don't free until reaped
+    // Track for safe deallocation on reap
+    trackUrb(u, data);
     return totalBytes;
 }
 
@@ -130,14 +148,28 @@ static int reapOneUrb(int fd) {
     struct usbdevfs_urb *c = nullptr;
     int ret = ioctl(fd, USBDEVFS_REAPURB, &c);
     if (ret < 0) return -1;
-    if (c) { free(c->buffer); free(c); }
+
+    // Find and free using our tracked pointers, not the kernel-returned ones
+    for (int i = 0; i < trackedCount; i++) {
+        if (trackedUrbs[i].urb == c) {
+            free(trackedUrbs[i].buffer);
+            free(trackedUrbs[i].urb);
+            // Remove from tracking by swapping with last
+            trackedUrbs[i] = trackedUrbs[trackedCount - 1];
+            trackedCount--;
+            return 0;
+        }
+    }
+
+    // Fallback: not tracked (shouldn't happen)
+    LOGW("reapOneUrb: reaped untracked URB %p", c);
     return 0;
 }
 
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioCreate(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioCreate(
         JNIEnv *, jobject, jint fd, jint ifId, jint epOut, jint epFb,
         jint rate, jint ch, jint bits, jint maxPkt) {
     LOGI("Create: fd=%d ep=0x%02x rate=%d ch=%d bits=%d", fd, epOut, rate, ch, bits);
@@ -163,7 +195,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT jboolean JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioSetAltSetting(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioSetAltSetting(
         JNIEnv *, jobject, jlong h, jint alt) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return JNI_FALSE;
@@ -171,7 +203,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT jboolean JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioSetSampleRate(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioSetSampleRate(
         JNIEnv *, jobject, jlong h, jint rate, jint csId) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return JNI_FALSE;
@@ -180,7 +212,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT jboolean JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioStart(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStart(
         JNIEnv *, jobject, jlong h) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return JNI_FALSE;
@@ -224,7 +256,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT void JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioWrite(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
         JNIEnv *env, jobject, jlong h, jfloatArray pcm) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx || !ctx->running.load()) return;
@@ -303,7 +335,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT void JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioStop(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStop(
         JNIEnv *, jobject, jlong h) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return;
@@ -317,7 +349,7 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
 }
 
 JNIEXPORT void JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudioDestroy(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioDestroy(
         JNIEnv *, jobject, jlong h) {
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return;
@@ -330,13 +362,20 @@ Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbAudi
         setAlternateSetting(ctx->fd, ctx->interfaceId, 0);
         releaseInterface(ctx->fd, ctx->interfaceId);
     }
+    // Free any remaining tracked URBs that weren't reaped
+    for (int i = 0; i < trackedCount; i++) {
+        free(trackedUrbs[i].buffer);
+        free(trackedUrbs[i].urb);
+    }
+    trackedCount = 0;
+
     free(ctx->transferBuffer);
     LOGI("Destroy: %lld frames total", (long long)ctx->framesWritten);
     delete ctx;
 }
 
 JNIEXPORT jint JNICALL
-Java_app_simple_felicity_engine_processors_UsbAudioOutputProcessor_nativeUsbReset(
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbReset(
         JNIEnv *, jobject, jint fd) {
     LOGI("USBDEVFS_RESET fd=%d", fd);
     int ret = ioctl(fd, USBDEVFS_RESET, 0);

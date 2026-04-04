@@ -1,4 +1,4 @@
-package app.simple.felicity.engine.processors
+package com.decent.usbaudio
 
 import android.util.Log
 
@@ -10,9 +10,9 @@ import android.util.Log
  * DAC via Linux usbdevfs isochronous transfers, bypassing the entire Android
  * audio stack (AudioFlinger, AudioTrack, AAudio).
  *
- * Lifecycle mirrors [AaudioOutputProcessor]:
+ * Lifecycle:
  * ```
- * UsbAudioOutputProcessor(fd, iface, ep, ...)
+ * UsbAudioStream(fd, iface, ep, ...)
  *     .setAltSetting(1)        // select format (bit depth)
  *     .setSampleRate(44100, 41) // configure DAC clock
  *     .start()
@@ -32,7 +32,7 @@ import android.util.Log
  *
  * @author DecentPlayer project
  */
-class UsbAudioOutputProcessor(
+class UsbAudioStream(
         fd: Int,
         interfaceId: Int,
         endpointOut: Int,
@@ -55,7 +55,7 @@ class UsbAudioOutputProcessor(
         }
     }
 
-    /** True when the native context was created and the interface was claimed. */
+    /** True when the native context exists and the stream hasn't fatally errored. */
     val isReady: Boolean
         get() = nativeHandle != 0L
 
@@ -120,7 +120,7 @@ class UsbAudioOutputProcessor(
         if (nativeHandle == 0L) return
         nativeUsbAudioDestroy(nativeHandle)
         nativeHandle = 0L
-        Log.i(TAG, "UsbAudioOutputProcessor released")
+        Log.i(TAG, "UsbAudioStream released")
     }
 
     // JNI declarations
@@ -138,7 +138,11 @@ class UsbAudioOutputProcessor(
     private external fun nativeUsbAudioDestroy(handle: Long)
 
     companion object {
-        private const val TAG = "UsbAudioOutputProcessor"
+        private const val TAG = "UsbAudioStream"
+
+        init {
+            System.loadLibrary("decent_usb_audio")
+        }
 
         /**
          * Perform a USB port reset on the device. Resets the DAC's clock state.

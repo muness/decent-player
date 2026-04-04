@@ -1,4 +1,4 @@
-package app.simple.felicity.engine.audio
+package com.decent.usbaudio
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -12,7 +12,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
-import app.simple.felicity.engine.processors.UsbAudioOutputProcessor
+
 
 /**
  * Manages the lifecycle of a USB Audio Class device for bit-perfect output.
@@ -21,14 +21,14 @@ import app.simple.felicity.engine.processors.UsbAudioOutputProcessor
  * - Discover connected USB audio devices
  * - Request user permission via [UsbManager.requestPermission]
  * - Open the device and extract endpoint/interface info
- * - Provide the file descriptor and endpoint addresses to [UsbAudioOutputProcessor]
+ * - Provide the file descriptor and endpoint addresses to [UsbAudioStream]
  *
  * This class does NOT perform audio I/O — that's handled by the native layer
- * via [UsbAudioOutputProcessor].
+ * via [UsbAudioStream].
  *
  * @author DecentPlayer project
  */
-class UsbAudioManager private constructor(private val context: Context) {
+class UsbAudioDevice private constructor(private val context: Context) {
 
     private var usbManager: UsbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private var connection: UsbDeviceConnection? = null
@@ -36,39 +36,23 @@ class UsbAudioManager private constructor(private val context: Context) {
     private var claimedInterface: UsbInterface? = null
 
     companion object {
-        private const val TAG = "UsbAudioManager"
-        private const val ACTION_USB_PERMISSION = "app.simple.felicity.USB_PERMISSION"
+        private const val TAG = "UsbAudioDevice"
+        private const val ACTION_USB_PERMISSION_SUFFIX = ".USB_AUDIO_PERMISSION"
 
         @Volatile
-        private var instance: UsbAudioManager? = null
+        private var instance: UsbAudioDevice? = null
 
         /**
-         * Get the singleton instance. All callers (MainActivity, AaudioAudioSink)
+         * Get the singleton instance. All callers share the same connection
          * share the same connection and fd, preventing ENODEV from competing opens.
          */
-        fun getInstance(context: Context): UsbAudioManager {
+        fun getInstance(context: Context): UsbAudioDevice {
             return instance ?: synchronized(this) {
-                instance ?: UsbAudioManager(context.applicationContext).also { instance = it }
+                instance ?: UsbAudioDevice(context.applicationContext).also { instance = it }
             }
         }
     }
 
-    /**
-     * Information about an opened USB audio device, ready for native I/O.
-     */
-    data class UsbAudioDeviceInfo(
-            val connection: UsbDeviceConnection,
-            val fd: Int,
-            val deviceName: String,
-            val interfaceId: Int,
-            val endpointOutAddress: Int,
-            val endpointFeedbackAddress: Int,
-            val maxPacketSize: Int,
-            val altSettingCount: Int,
-            val clockSourceId: Int,
-            val bestAltSetting: Int,
-            val bestBitDepth: Int
-    )
 
     /**
      * Find the first connected USB audio output device.
@@ -116,7 +100,7 @@ class UsbAudioManager private constructor(private val context: Context) {
             return
         }
 
-        val intent = Intent(ACTION_USB_PERMISSION)
+        val intent = Intent(context.packageName + ACTION_USB_PERMISSION_SUFFIX)
         intent.setPackage(context.packageName)
         val permissionIntent = PendingIntent.getBroadcast(
                 context, 0,
@@ -126,7 +110,7 @@ class UsbAudioManager private constructor(private val context: Context) {
 
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
-                if (intent.action == ACTION_USB_PERMISSION) {
+                if (intent.action == context.packageName + ACTION_USB_PERMISSION_SUFFIX) {
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                     Log.i(TAG, "USB permission result: granted=$granted for ${device.productName}")
                     context.unregisterReceiver(this)
@@ -135,7 +119,7 @@ class UsbAudioManager private constructor(private val context: Context) {
             }
         }
 
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        val filter = IntentFilter(context.packageName + ACTION_USB_PERMISSION_SUFFIX)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -310,7 +294,7 @@ class UsbAudioManager private constructor(private val context: Context) {
         Log.i(TAG, "Performing REAL USBDEVFS_RESET on fd=$fd...")
 
         // Real USB port reset via native ioctl — resets DAC clock state
-        val ret = UsbAudioOutputProcessor.nativeUsbReset(fd)
+        val ret = UsbAudioStream.nativeUsbReset(fd)
         Log.i(TAG, "USBDEVFS_RESET result: $ret")
 
         // Reset releases all interface claims. The fd remains valid.
