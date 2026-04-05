@@ -470,10 +470,22 @@ class AaudioAudioSink(
         }
 
         val usbDevice = usbAudioManager.findUsbAudioDevice() ?: return
-        val deviceInfo = usbAudioManager.openDevice(usbDevice)
+        var deviceInfo = usbAudioManager.openDevice(usbDevice)
         if (deviceInfo == null) {
             Log.e(TAG, "Failed to open USB device")
             return
+        }
+
+        // Detect stale fd: if setAltSetting(0) fails, the cached connection is dead.
+        // Close and reopen to get a fresh fd.
+        if (!usbAudioManager.setAltSetting(0)) {
+            Log.w(TAG, "Stale USB connection detected (setAlt(0) failed), reopening...")
+            usbAudioManager.closeDevice()
+            deviceInfo = usbAudioManager.openDevice(usbDevice)
+            if (deviceInfo == null) {
+                Log.e(TAG, "Failed to reopen USB device")
+                return
+            }
         }
 
         // Auto-detected from USB descriptors: use the highest bit depth alt setting

@@ -2,132 +2,99 @@
  * @file usb-audio-output.h
  * @brief Direct USB audio output context for bit-perfect playback.
  *
- * Bypasses the entire Android audio stack (AudioFlinger, AudioTrack, AAudio)
- * by communicating directly with a USB Audio Class 2.0 DAC via Linux usbdevfs
- * isochronous transfers.
- *
- * Pipeline architecture (modeled after (removed)'s xHCI behavior):
- * - 64 URBs in flight for continuous streaming ((removed) uses ~74)
- * - Each URB = 8 packets x 125us = 1ms of audio
- * - Total pipeline buffer: ~64ms
- * - Proper drain-wait-reconfigure sequence on rate transitions
- *
- * The file descriptor is obtained from Android's UsbDeviceConnection on the
- * Kotlin side and passed to the native layer via JNI.
+ * Pipeline architecture:
+ * - Pre-allocated ring buffer of 64 URB slots
+ * - Each URB = 8 ISO packets (1ms of audio at high-speed)
+ * - URBs complete in FIFO order (ISO_ASAP guarantees this)
+ * - No malloc/free during streaming — avoids MTE pointer tag issues
  */
 
 #pragma once
 
 #include <atomic>
 #include <cstdint>
+#include <linux/usbdevice_fs.h>
 
 /**
  * Number of isochronous packets per URB submission.
  * At USB high-speed (125us microframes), 8 packets = 1ms of audio.
- * Smaller URBs = more granular pipeline, smoother drain.
  */
 #define USB_AUDIO_PACKETS_PER_URB 8
 
 /**
- * Number of URBs to keep in flight for continuous streaming.
+ * Number of URBs in the ring buffer.
  * (removed) uses ~74 URBs. We use 64 for a ~64ms pipeline buffer.
- * This provides enough buffering for glitch-free playback while
- * allowing clean drain during rate transitions.
  */
 #define USB_AUDIO_NUM_URBS 64
 
 /**
- * Maximum tracked URBs (slightly more than NUM_URBS for safety).
+ * Max bytes per URB data buffer.
+ * Worst case: 384kHz * 4 bytes * 2 channels / 8000 microframes * 8 packets
+ *           = 384 * 8 = 3072 bytes per URB. Round up generously.
  */
-#define USB_AUDIO_MAX_TRACKED_URBS 80
+#define USB_AUDIO_URB_BUFFER_SIZE 4096
 
 /**
- * Maximum bytes per isochronous packet.
- * Cayin RU7 reports max_packet_size = 776 bytes.
- * 32-bit stereo at 384kHz = 384000 * 4 * 2 / 8000 = 384 bytes/microframe.
+ * One slot in the pre-allocated URB ring buffer.
+ * The URB struct and data buffer are allocated once at stream creation
+ * and reused for the lifetime of the stream. This avoids all MTE
+ * pointer tag issues since we never pass malloc'd pointers through
+ * the kernel and back.
  */
-#define USB_AUDIO_MAX_PACKET_SIZE 1024
-
-/**
- * URB tracking entry for safe deallocation after reap.
- * Android MTE (Memory Tagging Extension) may modify pointer tags on
- * kernel-returned pointers, making direct free() unsafe. We track our
- * original malloc'd pointers and free those instead.
- */
-struct TrackedUrb {
+struct UrbSlot {
+    /**
+     * The URB struct, heap-allocated with enough trailing space for
+     * USB_AUDIO_PACKETS_PER_URB iso_frame_desc entries.
+     */
     struct usbdevfs_urb *urb;
-    void *buffer;
-    bool active;  // true = submitted and not yet reaped
+
+    /** Data buffer for PCM audio. Fixed size, pre-allocated. */
+    uint8_t *buffer;
+
+    /** Actual number of bytes written to buffer for current submission. */
+    int dataLength;
 };
 
 /**
  * Aggregate state for one USB audio output stream.
- *
- * Allocated by nativeUsbAudioCreate(), freed by nativeUsbAudioDestroy().
  */
 struct UsbAudioContext {
-    /** File descriptor from UsbDeviceConnection.getFileDescriptor(). */
     int fd;
-
-    /** USB audio streaming interface number (typically 1). */
     int interfaceId;
-
-    /** Isochronous OUT endpoint address (e.g. 0x01). */
     int endpointOut;
-
-    /** Feedback IN endpoint address (e.g. 0x81). 0 if not used. */
     int endpointFeedback;
-
-    /** Playback sample rate in Hz (e.g. 44100, 96000). */
     int32_t sampleRate;
-
-    /** Number of interleaved channels (1=mono, 2=stereo). */
     int32_t channelCount;
-
-    /** Bits per sample: 16, 24, or 32. */
     int32_t bitDepth;
-
-    /** Bytes per single sample (bitDepth / 8). */
     int32_t bytesPerSample;
-
-    /** Bytes per frame (bytesPerSample * channelCount). */
     int32_t bytesPerFrame;
-
-    /** Max packet size reported by the endpoint descriptor. */
     int32_t maxPacketSize;
 
-    /** True after start(), cleared by stop()/drain. */
     std::atomic<bool> running;
 
-    /**
-     * Scratch buffer for PCM format conversion (float -> int16/24/32).
-     * Sized to hold one write() call's worth of audio data.
-     */
+    /** Scratch buffer for PCM format conversion (float -> int16/24/32). */
     uint8_t *transferBuffer;
-
-    /** Current capacity of transferBuffer in bytes. */
     int32_t transferBufferCapacity;
 
-    /** Total audio frames written since start (for debug logging). */
     int64_t framesWritten;
-
-    /** Whether the USB interface has been successfully claimed. */
     bool interfaceClaimed;
+
+    // ── Ring buffer ─────────────────────────────────────────────
+    /** Pre-allocated URB slots. Never freed during streaming. */
+    UrbSlot ring[USB_AUDIO_NUM_URBS];
+
+    /** Index of next slot to fill and submit (wraps modulo NUM_URBS). */
+    int submitIdx;
+
+    /** Index of next slot to reap (wraps modulo NUM_URBS). */
+    int reapIdx;
 
     /** Number of URBs currently submitted and not yet reaped. */
     int urbsInFlight;
 
-    /**
-     * Per-context URB tracking array for MTE-safe deallocation.
-     * Each entry tracks the original malloc'd pointers for one URB.
-     */
-    TrackedUrb trackedUrbs[USB_AUDIO_MAX_TRACKED_URBS];
-    int trackedCount;
+    /** Whether ring buffers have been allocated. */
+    bool ringAllocated;
 
-    /**
-     * Fractional accumulator for sample-rate-to-packet-size conversion.
-     * Tracks sub-frame remainders across URB boundaries for jitter-free
-     * isochronous packet sizing (e.g., 44100/8000 = 5.5125 frames/packet).
-     */
+    /** Fractional accumulator for sample-rate-to-packet-size conversion. */
     double frameAccumulator;
 };
