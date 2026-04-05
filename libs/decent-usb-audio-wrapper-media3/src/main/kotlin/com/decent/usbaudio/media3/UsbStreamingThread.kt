@@ -1,4 +1,4 @@
-package app.simple.felicity.engine.audio
+package com.decent.usbaudio.media3
 
 import android.util.Log
 import com.decent.usbaudio.UsbAudioStream

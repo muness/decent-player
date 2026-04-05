@@ -1,4 +1,4 @@
-# 🎵 decent-player
+# decent-player
 
 > A "Decent" Android music player with bit-perfect USB audio output.
 
@@ -6,7 +6,7 @@ Ships a custom userspace USB Audio Class 2.0 driver that bypasses the entire And
 
 ---
 
-## 🤬 What makes it indecent
+## What makes it indecent
 
 Android resamples everything to 48kHz before sending it to your USB DAC. Your 24-bit/96kHz FLAC? Butchered to 16-bit/48kHz by the time it reaches your $500 dongle.
 
@@ -16,50 +16,71 @@ Every other app accepts this. We didn't.
 
 ---
 
-## ⚡ The driver
+## Libraries
 
-🔇 Bypasses **AudioFlinger**, **AudioTrack**, **AAudio**, **ALSA**, and the kernel `snd-usb-audio` driver
+Two standalone libraries that any Android app can use:
 
-🎯 Sends PCM data directly via **Linux usbdevfs isochronous transfers**
+### `com.decent:usb-audio-driver`
+Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, and float-to-integer conversion with bit-perfect math.
 
-🔍 Auto-detects **Clock Source ID** and **optimal bit depth** from USB descriptors
+### `com.decent:usb-audio-wrapper-media3`
+Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, and (removed)-matched xHCI transition sequences. Five lines to integrate.
 
-🎛️ Supports any sample rate the DAC advertises (44.1kHz — 384kHz)
+```kotlin
+// That's it. Bit-perfect USB audio in your Media3 app.
+val delegate = DefaultAudioSink.Builder(context)
+    .setEnableFloatOutput(true)
+    .build()
+return UsbAudioSink(delegate, context)
+```
 
-📱 Works on **stock Android 13+**, no root required
+See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start guide.
 
-🔄 Pipeline of 8 isochronous URBs for glitch-free streaming
+---
 
-### ✅ Verified
+## The driver
+
+- Bypasses **AudioFlinger**, **AudioTrack**, **AAudio**, **ALSA**, and the kernel `snd-usb-audio` driver
+- Sends PCM data directly via **Linux usbdevfs isochronous transfers**
+- Auto-detects **Clock Source ID** and **optimal bit depth** from USB descriptors
+- Supports any sample rate the DAC advertises (44.1kHz — 384kHz)
+- Works on **stock Android 10+**, no root required
+- Pipeline of 20 isochronous URBs with dedicated streaming thread for glitch-free output
+- (removed)-matched rate transition sequence (from xHCI ftrace analysis)
+- Bit-perfect float-to-integer conversion (x2^N scaling, mathematically lossless for 16/24-bit)
+
+### Verified
 
 | Device | Android | DAC | Status |
 |--------|---------|-----|--------|
-| Samsung Galaxy S26 Ultra | 16 | Cayin RU7 | ✅ Bit-perfect confirmed |
-| iBasso DX340 | 13 | Cayin RU7 | ✅ Bit-perfect confirmed |
+| Samsung Galaxy S26 Ultra | 16 | Cayin RU7 | Bit-perfect confirmed |
+| iBasso DX340 | 13 | Cayin RU7 | Bit-perfect confirmed |
 
-### 🔬 How we know it's bit-perfect
+### How we know it's bit-perfect
 
 ```
 USB driver binding:     usbfs (ours, NOT snd-usb-audio)
 ALSA USB card:          none (kernel doesn't touch the DAC)
-AudioFlinger output:    SPEAKER only (not USB)  
+AudioFlinger output:    SPEAKER only (not USB)
 Qualcomm PAL:           zero USB activity
-Feedback endpoint:      44101.6 Hz (DAC hardware clock confirms rate)
-URB pipeline:           8 in-flight, zero drops over 578 consecutive samples
+CLOCK_VALID:            true (DAC confirms clock locked)
+Float conversion:       x2^N round-trip (exact for 16/24-bit)
+URB pipeline:           20 in-flight, zero drops, zero timeouts
+Streaming thread:       dedicated, decoupled from ExoPlayer
 ```
 
 ---
 
-## 🏚️ Prior art
+## Prior art
 
 Before this, bit-perfect USB audio on Android was exclusive to closed-source commercial apps:
 
 | App | Price | Source | Approach |
 |-----|-------|--------|----------|
-| USB Audio Player Pro | $8 | 🔒 Closed | Custom USB driver |
+| USB Audio Player Pro | $8 | Closed | Custom USB driver |
 
 
-| **decent-player** | **Free** | **🔓 Open** | **Custom USB driver** |
+| **decent-player** | **Free** | **Open** | **Custom USB driver** |
 
 Google's own Media3/ExoPlayer team has an [open issue](https://github.com/androidx/media/issues/415) requesting this since 2023. No open-source solution existed.
 
@@ -67,68 +88,62 @@ Google's own Media3/ExoPlayer team has an [open issue](https://github.com/androi
 
 ---
 
-## 🐛 Five bugs that took a night to find
+## Status
 
-Building this driver meant discovering five critical bugs, each of which independently caused **complete silence**:
+**The driver and libraries work. The player is a proof-of-concept.**
 
-### 1️⃣ Wrong Clock Source Entity ID
-The DAC accepts SET_CUR to non-existent entity IDs without error. Only parsing the raw USB descriptors reveals the real one. Our code brute-forced ID `0x0B` — the real one was `0x05`.
-
-### 2️⃣ Missing `USBDEVFS_URB_ISO_ASAP` flag
-Without this single flag (`0x02`), the xHCI host controller silently drops every isochronous packet. The kernel reports success. One byte, hours of debugging.
-
-### 3️⃣ Java vs native `setInterface()`
-The native `USBDEVFS_SETINTERFACE` ioctl does NOT allocate isochronous bandwidth in the xHCI scheduler. Only the Java `UsbDeviceConnection.setInterface()` does. Completely undocumented.
-
-### 4️⃣ URB pipeline depth
-Single submit-reap produces `#Iso=0` in the host controller. The DAC needs multiple URBs queued simultaneously. (removed) uses 74. We use 8. With 1, silence.
-
-### 5️⃣ Kernel driver race condition
-`snd-usb-audio` binds ~3ms after USB connect, before any Android intent fires. It configures the DAC to 384kHz. Our SET_CUR must target the correct clock entity to override this.
-
-> 📖 Full investigation: [`docs/driver/`](docs/driver/)
+This repo contains:
+- Two standalone libraries (`libs/`) ready for integration in any Media3 app
+- Complete technical documentation of the USB audio driver and libraries
+- Investigation notes, (removed) reverse engineering, xHCI ftrace analysis
+- Proof-of-concept integration inside a Felicity Music Player fork (`driver/Felicity/`)
 
 ---
 
-## 🚧 Status
+## Documentation
 
-**The driver works. The player doesn't exist yet.**
+### Library docs (for developers integrating the libraries)
 
-This repo currently contains:
-- 📄 Complete technical documentation of the USB audio driver
-- 🔍 Investigation notes, (removed) reverse engineering, hardware analysis
-- 🧪 Proof-of-concept implementation (inside a Felicity Music Player fork)
+| Document | What's inside |
+|----------|---------------|
+| [Getting Started](docs/libs/GETTING_STARTED.md) | Quick-start guide, 5-line integration example |
+| [Integration Guide](docs/libs/INTEGRATION_GUIDE.md) | Full setup for Media3 apps and standalone driver usage |
+| [Architecture](docs/libs/ARCHITECTURE.md) | Pipeline diagram, thread model, rate transitions, bit-perfect math |
 
-The goal is to build a standalone music player from scratch with a UI that doesn't look like it was designed in 2012.
+### Driver investigation docs (deep technical reference)
+
+| Document | What's inside |
+|----------|---------------|
+| [Executive Summary](docs/driver/01-executive-summary.md) | What we built and why it matters |
+| [Investigation Journey](docs/driver/02-investigation-journey.md) | The full story — every dead end and breakthrough |
+| [Technical Architecture](docs/driver/03-technical-architecture.md) | Data flow, components, USB protocol details |
+| [Five Critical Bugs](docs/driver/04-five-critical-bugs.md) | Each bug that caused silence — and the fix |
+| [Cayin RU7 Reference](docs/driver/05-cayin-ru7-hardware-reference.md) | Complete hardware analysis with raw USB descriptors |
+| [(removed) Analysis](docs/driver/06-uapp-reverse-engineering.md) | How USB Audio Player Pro works under the hood |
+| [Verification Guide](docs/driver/07-verification-and-diagnostics.md) | How to prove bit-perfect is actually happening |
+| [Descriptor Parsing](docs/driver/08-usb-descriptor-parsing.md) | Auto-detecting DAC capabilities from USB descriptors |
+| [Future Work](docs/driver/09-future-work.md) | Known limitations and roadmap |
+| [Samsung Specifics](docs/driver/10-samsung-s26-ultra-specifics.md) | UHQA, Qualcomm PAL, kernel race condition |
+| [Library Architecture](docs/driver/11-standalone-library-architecture.md) | How to package the driver for any Android app |
+
+### Hardware traces
+
+| File | What's inside |
+|------|---------------|
+| [(removed) xHCI Trace](docs/hardware/uapp-xhci-trace-adele-kansas-persona.txt) | 449k-line ftrace capture of (removed)'s exact transition sequence |
+| [(removed) Behavior Analysis](docs/hardware/uapp-behavior-analysis.md) | Analysis of (removed)'s USB protocol behavior |
+| [Cayin RU7 USB Analysis](docs/hardware/cayin-ru7-usb-analysis.md) | Raw USB descriptor dump and clock source mapping |
 
 ---
 
-## 📚 Documentation
+## License
 
-| # | Document | What's inside |
-|---|----------|---------------|
-| 📋 | [Executive Summary](docs/driver/01-executive-summary.md) | What we built and why it matters |
-| 🗺️ | [Investigation Journey](docs/driver/02-investigation-journey.md) | The full story — every dead end and breakthrough |
-| 🏗️ | [Technical Architecture](docs/driver/03-technical-architecture.md) | Data flow, components, USB protocol details |
-| 🐛 | [Five Critical Bugs](docs/driver/04-five-critical-bugs.md) | Each bug that caused silence — and the fix |
-| 🔧 | [Cayin RU7 Reference](docs/driver/05-cayin-ru7-hardware-reference.md) | Complete hardware analysis with raw USB descriptors |
-| 🕵️ | [(removed) Analysis](docs/driver/06-uapp-reverse-engineering.md) | How USB Audio Player Pro works under the hood |
-| ✅ | [Verification Guide](docs/driver/07-verification-and-diagnostics.md) | How to prove bit-perfect is actually happening |
-| 🧬 | [Descriptor Parsing](docs/driver/08-usb-descriptor-parsing.md) | Auto-detecting DAC capabilities from USB descriptors |
-| 🔮 | [Future Work](docs/driver/09-future-work.md) | Known limitations and roadmap |
-| 📱 | [Samsung Specifics](docs/driver/10-samsung-s26-ultra-specifics.md) | UHQA, Qualcomm PAL, kernel race condition |
-| 📦 | [Library Architecture](docs/driver/11-standalone-library-architecture.md) | How to package the driver for any Android app |
-
----
-
-## 📄 License
-
-The USB audio driver is original work — not derived from any existing project.
+The USB audio driver and libraries are original work — not derived from any existing project.
 
 The proof-of-concept was developed inside a fork of [Felicity Music Player](https://github.com/Hamza417/Felicity) (AGPL v3) by [Hamza417](https://github.com/Hamza417). The final decent-player app will be built from scratch.
 
 ---
 
 <p align="center">
-  <i>Built in one night. Because your music deserves better than 48kHz.</i>
+  <i>Built because your music deserves better than 48kHz.</i>
 </p>

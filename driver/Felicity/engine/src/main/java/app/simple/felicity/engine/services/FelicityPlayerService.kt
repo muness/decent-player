@@ -92,6 +92,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
     private var mediaSession: MediaLibrarySession? = null
     private lateinit var player: ExoPlayer
     private var renderersFactory: DefaultRenderersFactory? = null
+    private var currentUsbSink: com.decent.usbaudio.media3.UsbAudioSink? = null
 
     /**
      * The mediaId of the media item that was playing before the most recent item transition.
@@ -244,15 +245,16 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
 
                 audioSink.setOffloadMode(offloadMode)
 
-                /**
-                 * Wrap the [DefaultAudioSink] with [AaudioAudioSink] unconditionally.
-                 * The wrapper is a transparent forwarding sink when AAudio is disabled;
-                 * when [AudioPreferences.isAaudioEnabled] returns true, [handleBuffer]
-                 * also routes float PCM to the native AAudio stream for direct-to-HAL
-                 * low-latency output. The [DefaultAudioSink] (with its [AudioTrack] muted)
-                 * is kept alive for clock and state management.
-                 */
-                return AaudioAudioSink(audioSink, context)
+                // Use UsbAudioSink from the library when bit-perfect USB is active,
+                // otherwise use Felicity's AaudioAudioSink for AAudio/speaker output.
+                return if (AudioPreferences.isBitPerfectUsbEnabled()) {
+                    com.decent.usbaudio.media3.UsbAudioSink(audioSink, context).also {
+                        currentUsbSink = it
+                    }
+                } else {
+                    currentUsbSink = null
+                    AaudioAudioSink(audioSink, context)
+                }
             }
 
             override fun buildAudioRenderers(
@@ -840,11 +842,12 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 val audioId = item.mediaId.toLongOrNull() ?: return@let
 
                 // Set bit depth SYNCHRONOUSLY before ExoPlayer calls configure().
-                // This must complete before the audio renderer processes the new track,
-                // otherwise the USB bit-perfect path reads the wrong encoding.
-                if (AudioPreferences.isBitPerfectUsbEnabled()) {
+                // The UsbAudioSink uses this to select the optimal USB alt setting.
+                val usbSink = currentUsbSink
+                if (usbSink != null) {
                     runBlocking(Dispatchers.IO) {
                         val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
+                        usbSink.trackBitDepth = audio.bitPerSample.toInt()
                         AudioPreferences.setCurrentTrackBitDepth(audio.bitPerSample.toInt())
                         Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}")
                     }

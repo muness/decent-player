@@ -20,6 +20,7 @@ dependencyResolutionManagement {
 includeBuild('../../libs') {
     dependencySubstitution {
         substitute module('com.decent:usb-audio-driver') using project(':decent-usb-audio-driver')
+        substitute module('com.decent:usb-audio-wrapper-media3') using project(':decent-usb-audio-wrapper-media3')
     }
 }
 

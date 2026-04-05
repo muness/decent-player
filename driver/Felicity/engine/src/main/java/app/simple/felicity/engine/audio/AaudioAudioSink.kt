@@ -1,7 +1,6 @@
 package app.simple.felicity.engine.audio
 
 import android.content.Context
-import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
@@ -13,8 +12,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import app.simple.felicity.engine.processors.AaudioOutputProcessor
-import com.decent.usbaudio.UsbAudioDevice
-import com.decent.usbaudio.UsbAudioStream
 import app.simple.felicity.engine.utils.PcmUtils
 import app.simple.felicity.preferences.AudioPreferences
 import java.nio.ByteBuffer
@@ -52,15 +49,6 @@ class AaudioAudioSink(
     /** Native AAudio stream; null when AAudio is disabled or not yet configured. */
     private var aaudioStream: AaudioOutputProcessor? = null
 
-    /** Direct USB audio stream for bit-perfect output; null when not active. */
-    private var usbAudioStream: UsbAudioStream? = null
-
-    /** Manages USB device discovery, permissions, and connection lifecycle. */
-    private val usbAudioManager = UsbAudioDevice.getInstance(context)
-
-    /** Dedicated thread for USB audio streaming, decoupled from render thread. */
-    private var usbStreamingThread: UsbStreamingThread? = null
-
     /** PCM encoding of the most recently configured format. */
     private var currentEncoding: Int = C.ENCODING_PCM_16BIT
 
@@ -70,29 +58,8 @@ class AaudioAudioSink(
     /** Channel count of the most recently configured format. */
     private var currentChannelCount: Int = 0
 
-    /**
-     * Volume last requested by ExoPlayer. Stored so the AudioTrack volume can be
-     * un-muted correctly if AAudio is later disabled between configure calls.
-     */
     private var pendingVolume: Float = 1f
-
-    /**
-     * Tracks whether the delegate [DefaultAudioSink] is currently muted (volume = 0)
-     * because AAudio is producing the audible output. Used to avoid redundant
-     * [AudioTrack.setVolume] calls on every [handleBuffer] frame.
-     */
     private var delegateMuted: Boolean = false
-
-    /** Counter for handleBuffer timing logs. */
-    private var handleBufferCallCount: Long = 0
-    private var handleBufferNotConsumedCount: Long = 0
-
-    /**
-     * Tracks whether the current buffer has already been written to USB.
-     * When the delegate returns consumed=false, ExoPlayer retries with
-     * the same buffer. We must not write it to USB again on retry.
-     */
-    private var usbWritePendingForCurrentBuffer: Boolean = true
 
     /**
      * Configures the sink for [inputFormat]. Always delegates to [DefaultAudioSink],
@@ -105,56 +72,11 @@ class AaudioAudioSink(
         if (enc != Format.NO_VALUE) {
             currentEncoding = enc
         }
-        handleBufferCallCount = 0  // reset so first handleBuffer of new track is logged
-        Log.i(TAG, "configure: pcmEncoding=$enc (${when(enc) {
-            C.ENCODING_PCM_FLOAT -> "FLOAT"
-            C.ENCODING_PCM_16BIT -> "16BIT"
-            C.ENCODING_PCM_24BIT -> "24BIT"
-            C.ENCODING_PCM_32BIT -> "32BIT"
-            else -> "UNKNOWN($enc)"
-        }}) rate=${inputFormat.sampleRate} ch=${inputFormat.channelCount}")
         val sr = inputFormat.sampleRate.takeIf { it > 0 }
         val ch = inputFormat.channelCount.takeIf { it > 0 }
 
-        /**
-         * Bit-perfect USB path: bypass the entire Android audio stack.
-         *
-         * CRITICAL: We call super.configure() AFTER claiming the USB interface
-         * so that when AudioFlinger tries to open the USB device, the kernel
-         * driver is already detached and AudioFlinger falls back to another
-         * output (speaker). This prevents the Qualcomm PAL from fighting us
-         * for the USB endpoint.
-         */
-        if (AudioPreferences.isBitPerfectUsbEnabled() && sr != null && ch != null) {
-            val usbDevice = usbAudioManager.findUsbAudioDevice()
-            if (usbDevice != null && usbAudioManager.hasPermission(usbDevice)) {
-                // Configure USB FIRST — claim interface before AudioFlinger can
-                configureUsbBitPerfect(sr, ch, inputFormat.pcmEncoding)
-
-                /**
-                 * Force the MEDIA audio strategy to route to the built-in speaker
-                 * BEFORE configuring the delegate. This tells AudioFlinger to NOT
-                 * use the USB device for this app's media playback, preventing the
-                 * Qualcomm PAL from fighting our isochronous path.
-                 */
-                forceMediaToSpeaker()
-
-                super.configure(inputFormat, specifiedBufferSize, outputChannels)
-                muteDelegateIfNeeded()
-                Log.i(TAG, "Delegate configured (muted, routed to speaker)")
-                return
-            } else if (usbDevice != null) {
-                Log.w(TAG, "USB DAC found but no permission — falling through to AAudio")
-            }
-        }
-
         super.configure(inputFormat, specifiedBufferSize, outputChannels)
         if (sr == null || ch == null) return
-
-        // Release USB stream if bit-perfect was just disabled
-        if (usbAudioStream != null && !AudioPreferences.isBitPerfectUsbEnabled()) {
-            releaseUsbStream()
-        }
 
         if (!AudioPreferences.isAaudioEnabled()) {
             /**
@@ -231,71 +153,6 @@ class AaudioAudioSink(
             presentationTimeUs: Long,
             encodedAccessUnitCount: Int
     ): Boolean {
-        /**
-         * USB bit-perfect path: send PCM directly to the DAC, no mixer.
-         *
-         * CRITICAL: We do NOT call super.handleBuffer() here. If we did, the
-         * delegate AudioTrack would feed data to AudioFlinger which opens the
-         * USB ALSA device via the Qualcomm PAL, fighting our isochronous path.
-         *
-         * By skipping the delegate entirely, AudioFlinger has no data to send
-         * and the PAL has no reason to open the USB device. Our isochronous
-         * writes are the only audio path to the DAC.
-         *
-         * The isochronous write blocks until the URB completes, which provides
-         * natural backpressure matching the DAC's clock rate.
-         */
-        val usbStream = usbAudioStream
-        if (AudioPreferences.isBitPerfectUsbEnabled() && usbStream?.isAlive == true) {
-            muteDelegateIfNeeded()
-            val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
-
-            // Enqueue PCM to the USB streaming thread (~0ms, non-blocking).
-            // The USB thread writes at the DAC's clock rate via reap backpressure,
-            // completely decoupled from the delegate's timing.
-            // Guard against duplicates: when consumed=false, ExoPlayer retries
-            // with the same buffer. Only enqueue on the first call.
-            val thread = usbStreamingThread
-            if (thread != null && usbWritePendingForCurrentBuffer) {
-                handleBufferCallCount++
-
-                val bps = PcmUtils.bytesPerSample(currentEncoding)
-                val totalSamples = snapshot.remaining() / bps
-                if (totalSamples > 0) {
-                    val floatBuf = FloatArray(totalSamples)
-                    if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-                        snapshot.asFloatBuffer().get(floatBuf)
-                    } else {
-                        snapshot.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                        for (i in 0 until totalSamples) {
-                            floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
-                        }
-                    }
-                    // Log first few samples on first call of each track to verify data integrity
-                    if (handleBufferCallCount <= 3) {
-                        val s0 = if (totalSamples > 0) floatBuf[0] else 0f
-                        val s1 = if (totalSamples > 1) floatBuf[1] else 0f
-                        val s2 = if (totalSamples > 2) floatBuf[2] else 0f
-                        val s3 = if (totalSamples > 3) floatBuf[3] else 0f
-                        val min = floatBuf.minOrNull() ?: 0f
-                        val max = floatBuf.maxOrNull() ?: 0f
-                        Log.i(TAG, "handleBuffer #$handleBufferCallCount: encoding=${
-                            if (currentEncoding == C.ENCODING_PCM_FLOAT) "FLOAT" else "${bps*8}bit"
-                        } samples=$totalSamples first=[$s0, $s1, $s2, $s3] range=[$min, $max]")
-                    }
-                    thread.enqueue(floatBuf)
-                }
-                usbWritePendingForCurrentBuffer = false
-            }
-
-            // Feed the delegate (muted) for ExoPlayer's position tracking.
-            val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-            if (consumed) {
-                usbWritePendingForCurrentBuffer = true
-            }
-            return consumed
-        }
-
         val stream = aaudioStream
         if (!AudioPreferences.isAaudioEnabled() || stream?.isReady != true) {
             unmuteDelegateIfNeeded()
@@ -353,7 +210,6 @@ class AaudioAudioSink(
      */
     override fun flush() {
         super.flush()
-        usbStreamingThread?.flush()
         aaudioStream?.apply {
             stop()
             start()
@@ -371,13 +227,10 @@ class AaudioAudioSink(
     override fun reset() {
         super.reset()
         releaseAaudioStream()
-        // USB stream survives reset — configure() manages its lifecycle
     }
 
-    /** Releases all native streams, then the delegate. */
     override fun release() {
         releaseAaudioStream()
-        releaseUsbStream()
         super.release()
     }
 
@@ -444,17 +297,8 @@ class AaudioAudioSink(
     private fun releaseAaudioStream() {
         aaudioStream?.release()
         aaudioStream = null
-        // Do NOT reset currentSampleRate/currentChannelCount here.
-        // These fields are used by the USB cache check in configureUsbBitPerfect.
-        // Resetting them causes the USB stream to be needlessly destroyed and
-        // recreated on every configure() call that follows a reset()/flush().
-        // The rate fields are set correctly in configureUsbBitPerfect() when
-        // a new stream is created, so they don't need to be cleared here.
-        if (usbAudioStream == null) {
-            // Only reset rate when USB is not active (pure AAudio mode)
-            currentSampleRate = 0
-            currentChannelCount = 0
-        }
+        currentSampleRate = 0
+        currentChannelCount = 0
         unmuteDelegateIfNeeded()
         Log.i(TAG, "AAudio stream released")
     }
@@ -482,248 +326,7 @@ class AaudioAudioSink(
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Audio routing helpers
-    // ---------------------------------------------------------------------------
-
-    /**
-     * Force the MEDIA audio strategy to route to the built-in speaker instead
-     * of the USB device. This prevents AudioFlinger and the Qualcomm PAL from
-     * opening the USB ALSA device when our delegate AudioTrack plays (muted).
-     */
-    private fun forceMediaToSpeaker() {
-        try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-            if (speaker != null) {
-                delegate.setPreferredDevice(speaker)
-                Log.i(TAG, "Delegate preferred device set to built-in speaker")
-            } else {
-                Log.w(TAG, "No built-in speaker found")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "forceMediaToSpeaker failed: ${e.message}")
-        }
-    }
-
-    /**
-     * Clear forced routing so media goes back to the default device.
-     */
-    private fun clearForcedRouting() {
-        try {
-            delegate.setPreferredDevice(null)
-            Log.i(TAG, "Cleared forced delegate routing")
-        } catch (e: Exception) {
-            Log.w(TAG, "clearForcedRouting failed: ${e.message}")
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // USB bit-perfect helpers
-    // ---------------------------------------------------------------------------
-
-    /**
-     * Configures the direct USB audio output for bit-perfect playback.
-     *
-     * Opens the USB device, claims the streaming interface, selects the
-     * appropriate alternate setting for the bit depth, and sets the sample rate.
-     */
-    private fun configureUsbBitPerfect(sampleRate: Int, channelCount: Int, encoding: Int) {
-        // Check USB stream cache FIRST — before releaseAaudioStream() which
-        // resets currentSampleRate to 0 and would break this check.
-        if (sampleRate == currentSampleRate && channelCount == currentChannelCount
-            && usbAudioStream?.isAlive == true) {
-            // USB stream matches — just release AAudio if present
-            if (aaudioStream != null) releaseAaudioStream()
-            Log.d(TAG, "USB stream already configured for rate=$sampleRate ch=$channelCount — keeping it")
-            return
-        }
-
-        // Need to reconfigure — release both streams
-        if (aaudioStream != null) releaseAaudioStream()
-        if (usbAudioStream != null) releaseUsbStream()
-
-        val usbDevice = usbAudioManager.findUsbAudioDevice() ?: return
-        var deviceInfo = usbAudioManager.openDevice(usbDevice)
-        if (deviceInfo == null) {
-            Log.e(TAG, "Failed to open USB device")
-            return
-        }
-
-        // Select alt setting matching the source file's bit depth for true bit-perfect.
-        // AudioPreferences.currentTrackBitDepth is set by FelicityPlayerService from
-        // Audio.bitPerSample (jAudioTagger metadata) on each track transition.
-        // Always use the DAC's highest supported bit depth (like (removed)).
-        // Sources with lower bit depth (16-bit, 24-bit) are zero-padded in the LSBs.
-        // This is standard bit-perfect practice — original bits preserved in MSBs.
-        val bitDepth = deviceInfo.bestBitDepth
-        val altSetting = deviceInfo.bestAltSetting
-        val sourceBitDepth = AudioPreferences.getCurrentTrackBitDepth()
-        Log.i(TAG, "Bit-perfect: source=${sourceBitDepth}bit → alt=$altSetting usb=${bitDepth}bit " +
-                "clockSource=0x${deviceInfo.clockSourceId.toString(16)}")
-
-        Log.i(TAG, "Configuring USB bit-perfect: rate=$sampleRate ch=$channelCount " +
-                "bits=$bitDepth alt=$altSetting device=${deviceInfo.deviceName}")
-
-        // No USB reset needed — clock source ID 0x05 works correctly
-        var stream = UsbAudioStream(
-                fd = deviceInfo.fd,
-                interfaceId = deviceInfo.interfaceId,
-                endpointOut = deviceInfo.endpointOutAddress,
-                endpointFeedback = deviceInfo.endpointFeedbackAddress,
-                sampleRate = sampleRate,
-                channelCount = channelCount,
-                bitDepth = bitDepth,
-                maxPacketSize = deviceInfo.maxPacketSize
-        )
-
-        if (!stream.isReady) {
-            Log.e(TAG, "USB stream creation failed")
-            stream.release()
-            return
-        }
-
-        // ─── (removed)-matched transition sequence (from xHCI ftrace) ───
-        //
-        // (removed)'s EXACT sequence for rate transitions:
-        //   1. setAlt(0)          → xHCI Configure Endpoint (FREE old rings)
-        //   2. SET_CUR            → write new sample rate to Clock Source
-        //   3. GET_CUR            → verify clock accepted the rate
-        //   4. setAlt(0) AGAIN    → defensive reset after clock change
-        //   5. setAlt(3)          → xHCI Configure Endpoint (ALLOC new rings)
-        //   6. wait ~47ms         → DAC PLL lock time
-        //   7. first URBs         → start streaming
-        //
-        // Step 4 (second setAlt(0)) is critical: it forces the xHCI to
-        // finalize ring cleanup after the clock change. Without it, the
-        // xHCI gets stuck after 3-4 transitions.
-
-        // Step 1: setAlt(0) — FREE old ISO rings
-        if (!usbAudioManager.setAltSetting(0)) {
-            Log.w(TAG, "setAlt(0) failed — stale fd, reopening device...")
-            usbAudioManager.closeDevice()
-            stream.release()
-            deviceInfo = usbAudioManager.openDevice(usbDevice)
-            if (deviceInfo == null) {
-                Log.e(TAG, "Failed to reopen USB device")
-                return
-            }
-            stream = UsbAudioStream(
-                    fd = deviceInfo.fd,
-                    interfaceId = deviceInfo.interfaceId,
-                    endpointOut = deviceInfo.endpointOutAddress,
-                    endpointFeedback = deviceInfo.endpointFeedbackAddress,
-                    sampleRate = sampleRate,
-                    channelCount = channelCount,
-                    bitDepth = bitDepth,
-                    maxPacketSize = deviceInfo.maxPacketSize
-            )
-            if (!stream.isReady) {
-                Log.e(TAG, "USB stream recreation failed after reopen")
-                stream.release()
-                return
-            }
-            Log.i(TAG, "Device reopened with fresh fd=${deviceInfo.fd}")
-        }
-        Log.i(TAG, "Step 1: setAlt(0) — old ISO ring freed")
-
-        // Step 2: SET_CUR — write new sample rate
-        usbAudioManager.setSampleRate(sampleRate)
-
-        // Step 3: GET_CUR(CLOCK_VALID_CONTROL) — verify clock is locked
-        // (removed) reads selector 0x02 (CLOCK_VALID) not 0x01 (SAM_FREQ)
-        val clockValid = usbAudioManager.readClockValid()
-        Log.i(TAG, "Step 2-3: SET_CUR=$sampleRate, CLOCK_VALID=$clockValid")
-
-        // Step 4: setAlt(0) AGAIN — defensive reset after clock change
-        // ((removed) does this at line 14769 of the ftrace, after SET_CUR/GET_CUR)
-        usbAudioManager.setAltSetting(0)
-        Log.i(TAG, "Step 4: setAlt(0) again — defensive reset")
-
-        // Step 5: setAlt(3) — ALLOC new ISO rings
-        val altResult = usbAudioManager.setAltSetting(altSetting)
-        Log.i(TAG, "Step 5: setAlt($altSetting): $altResult — new ISO ring allocated")
-
-        // Step 6: wait ~47ms — DAC PLL lock time
-        Thread.sleep(50)
-
-        if (!stream.start()) {
-            Log.e(TAG, "USB stream start failed")
-            stream.release()
-            return
-        }
-
-        usbStreamingThread = UsbStreamingThread(stream).also { it.start() }
-        usbAudioStream = stream
-        currentSampleRate = sampleRate
-        currentChannelCount = channelCount
-        muteDelegateIfNeeded()
-
-        Log.i(TAG, "USB bit-perfect stream ACTIVE: rate=$sampleRate ch=$channelCount " +
-                "bits=$bitDepth device=${deviceInfo.deviceName}")
-    }
-
-    /**
-     * Writes a PCM buffer snapshot to the USB audio stream.
-     * Converts the ByteBuffer to a FloatArray (same as AAudio path) and
-     * forwards to the native USB output.
-     */
-    private fun writeSnapshotToUsb(snapshot: ByteBuffer, stream: UsbAudioStream) {
-        val bps = PcmUtils.bytesPerSample(currentEncoding)
-        val totalSamples = snapshot.remaining() / bps
-        if (totalSamples <= 0) return
-
-        val floatBuf = FloatArray(totalSamples)
-
-        if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-            snapshot.asFloatBuffer().get(floatBuf)
-        } else {
-            for (i in 0 until totalSamples) {
-                floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
-            }
-        }
-
-        stream.write(floatBuf)
-    }
-
-    /**
-     * Releases the USB audio stream with proper reference-impl-style drain sequence.
-     *
-     * The critical insight from xHCI ftrace analysis of (removed):
-     * ALL in-flight URBs must be drained BEFORE calling setAlt(0).
-     * The xHCI Configure Endpoint Command triggered by setAlt(0) frees
-     * the isochronous ring — if URBs are still pending, the host
-     * controller state becomes corrupted and subsequent transfers fail.
-     *
-     * Sequence: stop() -> drainUrbs() -> release() -> (Kotlin does setAlt(0))
-     */
-    private fun releaseUsbStream() {
-        val stream = usbAudioStream ?: return
-        usbAudioStream = null
-
-        // 0. Stop the streaming thread FIRST (drains queue, joins thread)
-        usbStreamingThread?.stop()
-        usbStreamingThread = null
-
-        // 1. Stop accepting new writes
-        stream.stop()
-
-        // 2. Drain ALL in-flight URBs (blocking) — MUST complete before setAlt(0)
-        val drained = stream.drainUrbs()
-        Log.i(TAG, "USB stream drained $drained URBs")
-
-        // 3. Release native context
-        stream.release()
-
-        // NEVER close the device connection between tracks.
-        // Closing/reopening corrupts the xHCI endpoint state after ~3 cycles.
-        // The (removed) approach: keep the same UsbDeviceConnection forever,
-        // and use setAlt(0)->SET_CUR->setAlt(N) to change rate on the same fd.
-        clearForcedRouting()
-        unmuteDelegateIfNeeded()
-        Log.i(TAG, "USB audio stream released (device kept open)")
-    }
+    // USB bit-perfect is now in the library: com.decent.usbaudio.media3.UsbAudioSink
 
     companion object {
         private const val TAG = "AaudioAudioSink"
