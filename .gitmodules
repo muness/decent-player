@@ -1,0 +1,3 @@
+[submodule "libs/decent-media3-decoder-flac/src/main/jni/libflac"]
+	path = libs/decent-media3-decoder-flac/src/main/jni/libflac
+	url = https://github.com/xiph/flac.git
