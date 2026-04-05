@@ -198,39 +198,68 @@ static int drainAllUrbs(UsbAudioContext *ctx) {
     int initialCount = ctx->urbsInFlight;
     LOGI("drainAllUrbs: draining %d URBs...", initialCount);
 
+    // Phase 1: try to reap naturally (URBs that completed normally)
     while (ctx->urbsInFlight > 0) {
         int result = reapOldestUrb(ctx, 500);
         if (result == 0) {
             drained++;
-        } else if (result == -2) {
-            LOGW("drainAllUrbs: timeout after %d/%d, discarding remaining %d",
-                 drained, initialCount, ctx->urbsInFlight);
-            // Discard remaining URBs
-            while (ctx->urbsInFlight > 0) {
-                UrbSlot *slot = &ctx->ring[ctx->reapIdx];
-                ioctl(ctx->fd, USBDEVFS_DISCARDURB, slot->urb);
-                struct usbdevfs_urb *disc = nullptr;
-                // Brief wait for discard to complete
-                for (int j = 0; j < 50; j++) {
-                    if (ioctl(ctx->fd, USBDEVFS_REAPURBNDELAY, &disc) == 0) break;
-                    usleep(1000);
-                }
-                ctx->reapIdx = (ctx->reapIdx + 1) % USB_AUDIO_NUM_URBS;
-                ctx->urbsInFlight--;
-                drained++;
-            }
-            break;
         } else {
-            LOGE("drainAllUrbs: error after %d/%d", drained, initialCount);
-            // Force reset counters
-            ctx->urbsInFlight = 0;
-            ctx->submitIdx = 0;
-            ctx->reapIdx = 0;
+            // Timeout or error — move to phase 2
             break;
         }
     }
 
-    LOGI("drainAllUrbs: drained %d/%d, inflight=%d", drained, initialCount, ctx->urbsInFlight);
+    if (ctx->urbsInFlight > 0) {
+        LOGW("drainAllUrbs: %d/%d reaped naturally, discarding remaining %d",
+             drained, initialCount, ctx->urbsInFlight);
+
+        // Phase 2: DISCARD all remaining URBs first
+        int toDiscard = ctx->urbsInFlight;
+        for (int i = 0; i < toDiscard; i++) {
+            int slotIdx = (ctx->reapIdx + i) % USB_AUDIO_NUM_URBS;
+            ioctl(ctx->fd, USBDEVFS_DISCARDURB, ctx->ring[slotIdx].urb);
+        }
+
+        // Phase 3: Reap ALL pending completions from the event ring.
+        // CRITICAL: Don't match 1:1 with discards — REAPURBNDELAY returns
+        // completions from ANY endpoint in ANY order. We must drain the
+        // entire completion queue to prevent event ring accumulation that
+        // would corrupt future streams.
+        int reaped = 0;
+        for (int attempt = 0; attempt < 500 && reaped < toDiscard; attempt++) {
+            struct usbdevfs_urb *c = nullptr;
+            int ret = ioctl(ctx->fd, USBDEVFS_REAPURBNDELAY, &c);
+            if (ret == 0 && c != nullptr) {
+                reaped++;
+            } else if (ret < 0 && errno != EAGAIN) {
+                LOGE("drainAllUrbs: reap error errno=%d", errno);
+                break;
+            } else {
+                usleep(1000);  // 1ms
+            }
+        }
+        LOGI("drainAllUrbs: discarded %d, reaped %d completions", toDiscard, reaped);
+        drained += reaped;
+
+        // Phase 4: Flush any remaining stale completions (from previous
+        // sessions' leaked feedback URBs, etc.)
+        for (int i = 0; i < 10; i++) {
+            struct usbdevfs_urb *c = nullptr;
+            if (ioctl(ctx->fd, USBDEVFS_REAPURBNDELAY, &c) == 0 && c != nullptr) {
+                LOGW("drainAllUrbs: flushed stale completion %p", c);
+                drained++;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Reset ring to clean state
+    ctx->urbsInFlight = 0;
+    ctx->submitIdx = 0;
+    ctx->reapIdx = 0;
+
+    LOGI("drainAllUrbs: drained %d/%d, ring reset", drained, initialCount);
     return drained;
 }
 
@@ -310,11 +339,11 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStart(
     ctx->urbsInFlight = 0;
     ctx->frameAccumulator = 0.0;
 
-    if (ctx->endpointFeedback > 0) {
-        double fb = readFeedback(ctx->fd, ctx->endpointFeedback);
-        if (fb > 0) LOGI("Start: feedback=%.4f frames/mf (%.1f Hz)", fb, fb * 8000.0);
-        else LOGW("Start: feedback not responding");
-    }
+    // NOTE: Do NOT call readFeedback() here! It uses REAPURBNDELAY on the
+    // shared fd, which can reap stale URBs from previous sessions' feedback
+    // reads. Each leaked feedback URB corrupts the audio ring's FIFO order,
+    // causing "xHCI stuck" after 2-3 transitions. Feedback is only safe to
+    // read with a dedicated reap mechanism (not shared REAPURBNDELAY).
 
     LOGI("Start: rate=%d ch=%d bits=%d ring=%d slots",
          ctx->sampleRate, ctx->channelCount, ctx->bitDepth, USB_AUDIO_NUM_URBS);
@@ -385,9 +414,9 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
 
         // Wait for a free slot if pipeline is full
         if (ctx->urbsInFlight >= USB_AUDIO_NUM_URBS) {
-            int result = reapOldestUrb(ctx, 200);
+            int result = reapOldestUrb(ctx, 2000);
             if (result == -2) {
-                LOGE("Write: xHCI stuck, draining pipeline");
+                LOGE("Write: reap timeout 2000ms, inflight=%d", ctx->urbsInFlight);
                 drainAllUrbs(ctx);
                 ctx->running.store(false);
                 return;

@@ -476,18 +476,6 @@ class AaudioAudioSink(
             return
         }
 
-        // Detect stale fd: if setAltSetting(0) fails, the cached connection is dead.
-        // Close and reopen to get a fresh fd.
-        if (!usbAudioManager.setAltSetting(0)) {
-            Log.w(TAG, "Stale USB connection detected (setAlt(0) failed), reopening...")
-            usbAudioManager.closeDevice()
-            deviceInfo = usbAudioManager.openDevice(usbDevice)
-            if (deviceInfo == null) {
-                Log.e(TAG, "Failed to reopen USB device")
-                return
-            }
-        }
-
         // Auto-detected from USB descriptors: use the highest bit depth alt setting
         val bitDepth = deviceInfo.bestBitDepth
         val altSetting = deviceInfo.bestAltSetting
@@ -498,7 +486,7 @@ class AaudioAudioSink(
                 "bits=$bitDepth alt=$altSetting device=${deviceInfo.deviceName}")
 
         // No USB reset needed — clock source ID 0x05 works correctly
-        val stream = UsbAudioStream(
+        var stream = UsbAudioStream(
                 fd = deviceInfo.fd,
                 interfaceId = deviceInfo.interfaceId,
                 endpointOut = deviceInfo.endpointOutAddress,
@@ -515,41 +503,68 @@ class AaudioAudioSink(
             return
         }
 
-        /**
-         * UAC2 transition: alt=0 -> SET_CUR -> alt=N
-         * CRITICAL: setAlt() MUST use Java UsbDeviceConnection.setInterface()
-         * because only the Java path triggers the xHCI Configure Endpoint
-         * Command that properly frees/allocs the isochronous ring.
-         */
-        // (removed) transition sequence (from xHCI ftrace on iBasso DX340):
+        // ─── (removed)-matched transition sequence (from xHCI ftrace) ───
         //
-        // Previous stream was already drained via releaseUsbStream():
-        //   stop() -> drainUrbs() -> release()
-        // All URBs are guaranteed to be reaped at this point.
+        // (removed)'s EXACT sequence for rate transitions:
+        //   1. setAlt(0)          → xHCI Configure Endpoint (FREE old rings)
+        //   2. SET_CUR            → write new sample rate to Clock Source
+        //   3. GET_CUR            → verify clock accepted the rate
+        //   4. setAlt(0) AGAIN    → defensive reset after clock change
+        //   5. setAlt(3)          → xHCI Configure Endpoint (ALLOC new rings)
+        //   6. wait ~47ms         → DAC PLL lock time
+        //   7. first URBs         → start streaming
         //
-        // CRITICAL: Even after drain, the xHCI host controller needs time
-        // to finish internal ring cleanup before a Configure Endpoint Command.
-        // (removed) shows ~195ms gap between drain and setAlt(0). Without this
-        // delay, rapid transitions (e.g., 3+ in a row) cause the xHCI to
-        // get stuck because the Configure Endpoint Command arrives while
-        // the controller is still processing the old ring teardown.
+        // Step 4 (second setAlt(0)) is critical: it forces the xHCI to
+        // finalize ring cleanup after the clock change. Without it, the
+        // xHCI gets stuck after 3-4 transitions.
 
-        Thread.sleep(100)  // Post-drain xHCI stabilization
+        // Step 1: setAlt(0) — FREE old ISO rings
+        if (!usbAudioManager.setAltSetting(0)) {
+            Log.w(TAG, "setAlt(0) failed — stale fd, reopening device...")
+            usbAudioManager.closeDevice()
+            stream.release()
+            deviceInfo = usbAudioManager.openDevice(usbDevice)
+            if (deviceInfo == null) {
+                Log.e(TAG, "Failed to reopen USB device")
+                return
+            }
+            stream = UsbAudioStream(
+                    fd = deviceInfo.fd,
+                    interfaceId = deviceInfo.interfaceId,
+                    endpointOut = deviceInfo.endpointOutAddress,
+                    endpointFeedback = deviceInfo.endpointFeedbackAddress,
+                    sampleRate = sampleRate,
+                    channelCount = channelCount,
+                    bitDepth = deviceInfo.bestBitDepth,
+                    maxPacketSize = deviceInfo.maxPacketSize
+            )
+            if (!stream.isReady) {
+                Log.e(TAG, "USB stream recreation failed after reopen")
+                stream.release()
+                return
+            }
+            Log.i(TAG, "Device reopened with fresh fd=${deviceInfo.fd}")
+        }
+        Log.i(TAG, "Step 1: setAlt(0) — old ISO ring freed")
 
-        usbAudioManager.setAltSetting(0)  // Configure Endpoint: FREE old ISO ring
-        Log.i(TAG, "setAlt(0): old ISO ring freed")
-
+        // Step 2: SET_CUR — write new sample rate
         usbAudioManager.setSampleRate(sampleRate)
 
+        // Step 3: GET_CUR — verify rate accepted
         val actualRate = usbAudioManager.readSampleRate()
-        Log.i(TAG, "DAC reports sample rate: $actualRate Hz (requested: $sampleRate Hz)")
+        Log.i(TAG, "Step 2-3: SET_CUR=$sampleRate, GET_CUR=$actualRate Hz")
 
-        Thread.sleep(50)  // Let SET_CUR propagate before new ring allocation
+        // Step 4: setAlt(0) AGAIN — defensive reset after clock change
+        // ((removed) does this at line 14769 of the ftrace, after SET_CUR/GET_CUR)
+        usbAudioManager.setAltSetting(0)
+        Log.i(TAG, "Step 4: setAlt(0) again — defensive reset")
 
-        val altResult = usbAudioManager.setAltSetting(altSetting)  // Configure Endpoint: ALLOC new ISO ring
-        Log.i(TAG, "setAlt($altSetting): $altResult — new ISO ring allocated")
+        // Step 5: setAlt(3) — ALLOC new ISO rings
+        val altResult = usbAudioManager.setAltSetting(altSetting)
+        Log.i(TAG, "Step 5: setAlt($altSetting): $altResult — new ISO ring allocated")
 
-        Thread.sleep(50)  // xHCI endpoint stabilization before first URB
+        // Step 6: wait ~47ms — DAC PLL lock time
+        Thread.sleep(50)
 
         if (!stream.start()) {
             Log.e(TAG, "USB stream start failed")
