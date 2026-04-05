@@ -564,4 +564,147 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbReset(
     return 0;
 }
 
+// ── Integer padding (lossless, zero float) ──────────────────────────
+
+// 16-bit → 32-bit: shift left 16
+static void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
+    auto *out = reinterpret_cast<int32_t *>(dst);
+    auto *in16 = reinterpret_cast<const int16_t *>(src);
+    for (int i = 0; i < numSamples; i++) out[i] = (int32_t)in16[i] << 16;
+}
+
+// int32 (24-bit sign-extended from libFLAC) → 32-bit: shift left 8
+static void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples) {
+    auto *out = reinterpret_cast<int32_t *>(dst);
+    auto *in32 = reinterpret_cast<const int32_t *>(src);
+    for (int i = 0; i < numSamples; i++) out[i] = in32[i] << 8;
+}
+
+// 24-bit packed (3 bytes/sample) → 32-bit: read 3 bytes, sign-extend, shift left 8
+static void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
+    auto *out = reinterpret_cast<int32_t *>(dst);
+    for (int i = 0; i < numSamples; i++) {
+        int32_t s = src[i*3] | (src[i*3+1] << 8) | (src[i*3+2] << 16);
+        if (s & 0x800000) s |= 0xFF000000;  // sign-extend from 24 to 32 bits
+        out[i] = s << 8;  // shift to fill 32-bit range
+    }
+}
+
+// ── Shared URB submission logic ─────────────────────────────────────
+
+/**
+ * Submit PCM data (already in the target bit depth) to the USB pipeline.
+ * Used by both nativeUsbAudioWrite (float path) and nativeUsbAudioWriteRaw.
+ */
+static void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes) {
+    int offset = 0;
+    double fpmf = ctx->sampleRate / 8000.0;
+
+    while (offset < totalBytes && ctx->running.load()) {
+        int pktSizes[USB_AUDIO_PACKETS_PER_URB];
+        int numPackets = 0;
+        int urbBytes = 0;
+
+        for (int p = 0; p < USB_AUDIO_PACKETS_PER_URB; p++) {
+            int remaining = totalBytes - offset - urbBytes;
+            if (remaining <= 0) break;
+
+            ctx->frameAccumulator += fpmf;
+            int frames = (int)ctx->frameAccumulator;
+            ctx->frameAccumulator -= frames;
+            int b = frames * ctx->bytesPerFrame;
+
+            if (b > remaining) {
+                b = (remaining / ctx->bytesPerFrame) * ctx->bytesPerFrame;
+                if (b <= 0) break;
+            }
+
+            pktSizes[p] = b;
+            urbBytes += b;
+            numPackets++;
+        }
+        if (numPackets <= 0 || urbBytes <= 0) break;
+
+        if (ctx->urbsInFlight >= USB_AUDIO_NUM_URBS) {
+            int result = reapOldestUrb(ctx, 200);
+            if (result == -2) {
+                LOGE("submitPcmToUrbs: reap timeout, inflight=%d", ctx->urbsInFlight);
+                drainAllUrbs(ctx);
+                ctx->running.store(false);
+                return;
+            } else if (result < 0) {
+                ctx->running.store(false);
+                return;
+            }
+        }
+
+        UrbSlot *slot = &ctx->ring[ctx->submitIdx];
+        memcpy(slot->buffer, pcmData + offset, urbBytes);
+
+        if (submitRingUrb(ctx, pktSizes, numPackets, urbBytes) < 0) {
+            LOGE("submitPcmToUrbs: submit failed, stopping stream");
+            ctx->running.store(false);
+            return;
+        }
+        offset += urbBytes;
+    }
+}
+
+// ── Raw bytes write (no float, for libFLAC integer path) ────────────
+
+JNIEXPORT void JNICALL
+Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
+        JNIEnv *env, jobject, jlong h, jbyteArray pcm, jint inputBitDepth) {
+    auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
+    if (!ctx || !ctx->running.load()) return;
+
+    jint inputBytes = env->GetArrayLength(pcm);
+    if (inputBytes <= 0) return;
+
+    int inputBps = inputBitDepth / 8;
+    int totalSamples = inputBytes / inputBps;
+    int totalFrames = totalSamples / ctx->channelCount;
+    int outputBytes = totalSamples * ctx->bytesPerSample;
+
+    // Resize transfer buffer if needed
+    if (!ctx->transferBuffer || ctx->transferBufferCapacity < outputBytes) {
+        free(ctx->transferBuffer);
+        ctx->transferBuffer = (uint8_t *)malloc(outputBytes);
+        ctx->transferBufferCapacity = outputBytes;
+    }
+
+    jbyte *rawData = env->GetByteArrayElements(pcm, nullptr);
+    if (!rawData) return;
+
+    // Bit-depth matching: pad input to DAC's bit depth (lossless integer ops)
+    if (inputBitDepth == ctx->bitDepth) {
+        // Same bit depth: zero-copy
+        memcpy(ctx->transferBuffer, rawData, inputBytes);
+    } else if (inputBitDepth == 16 && ctx->bitDepth == 32) {
+        padInt16ToInt32((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
+    } else if (inputBitDepth == 24 && ctx->bitDepth == 32) {
+        // 24-bit packed (3 bytes/sample) → 32-bit: sign-extend + shift left 8
+        padInt24ToInt32((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
+    } else if (inputBitDepth == 32 && ctx->bitDepth == 32) {
+        // libFLAC 24-bit → PCM_32BIT (sign-extended): shift left 8 to fill 32-bit range
+        shiftInt32From24((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
+    } else {
+        LOGE("WriteRaw: unsupported bit-depth conversion %d → %d", inputBitDepth, ctx->bitDepth);
+        env->ReleaseByteArrayElements(pcm, rawData, JNI_ABORT);
+        return;
+    }
+
+    env->ReleaseByteArrayElements(pcm, rawData, JNI_ABORT);
+
+    // Submit to USB pipeline
+    submitPcmToUrbs(ctx, ctx->transferBuffer, outputBytes);
+
+    ctx->framesWritten += totalFrames;
+    if (ctx->framesWritten % ctx->sampleRate < (int64_t)totalFrames) {
+        LOGI("WriteRaw: %lld frames (~%.0f sec) inflight=%d inputBits=%d",
+             (long long)ctx->framesWritten, (double)ctx->framesWritten/ctx->sampleRate,
+             ctx->urbsInFlight, inputBitDepth);
+    }
+}
+
 } // extern "C"

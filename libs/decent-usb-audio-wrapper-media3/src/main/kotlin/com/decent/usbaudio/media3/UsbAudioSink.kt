@@ -109,26 +109,31 @@ class UsbAudioSink(
             val thread = usbStreamingThread
             if (thread != null && usbWritePendingForCurrentBuffer) {
                 handleBufferCallCount++
-                val bps = PcmUtils.bytesPerSample(currentEncoding)
-                val totalSamples = snapshot.remaining() / bps
-                if (totalSamples > 0) {
-                    val floatBuf = FloatArray(totalSamples)
-                    if (currentEncoding == C.ENCODING_PCM_FLOAT) {
+
+                if (currentEncoding == C.ENCODING_PCM_FLOAT) {
+                    // Float path: FFmpeg (MP3, AAC, FLAC via float)
+                    val totalSamples = snapshot.remaining() / 4
+                    if (totalSamples > 0) {
+                        val floatBuf = FloatArray(totalSamples)
                         snapshot.asFloatBuffer().get(floatBuf)
-                    } else {
-                        snapshot.order(ByteOrder.LITTLE_ENDIAN)
-                        for (i in 0 until totalSamples) {
-                            floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
+                        if (handleBufferCallCount <= 3) {
+                            Log.i(TAG, "handleBuffer #$handleBufferCallCount: FLOAT samples=$totalSamples")
                         }
+                        thread.enqueue(floatBuf)
                     }
-                    if (handleBufferCallCount <= 3) {
-                        val s0 = if (totalSamples > 0) floatBuf[0] else 0f
-                        val s1 = if (totalSamples > 1) floatBuf[1] else 0f
-                        Log.i(TAG, "handleBuffer #$handleBufferCallCount: encoding=${
-                            if (currentEncoding == C.ENCODING_PCM_FLOAT) "FLOAT" else "${bps*8}bit"
-                        } samples=$totalSamples first=[$s0, $s1]")
+                } else {
+                    // Raw bytes path: libFLAC → int nativo → direto pro USB
+                    // Zero float in the entire pipeline.
+                    val remaining = snapshot.remaining()
+                    if (remaining > 0) {
+                        val rawBytes = ByteArray(remaining)
+                        snapshot.get(rawBytes)
+                        if (handleBufferCallCount <= 3) {
+                            val bps = PcmUtils.bytesPerSample(currentEncoding)
+                            Log.i(TAG, "handleBuffer #$handleBufferCallCount: RAW ${bps*8}bit bytes=$remaining")
+                        }
+                        thread.enqueueRaw(rawBytes, currentEncoding)
                     }
-                    thread.enqueue(floatBuf)
                 }
                 usbWritePendingForCurrentBuffer = false
             }

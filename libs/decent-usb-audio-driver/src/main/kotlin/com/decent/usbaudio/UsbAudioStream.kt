@@ -114,6 +114,27 @@ class UsbAudioStream(
     }
 
     /**
+     * Write raw integer PCM bytes directly to the USB DAC (no float conversion).
+     *
+     * The native layer pads the input bit depth to the DAC's bit depth using
+     * lossless integer operations (shift left, zero-fill LSBs). This is the
+     * true bit-perfect path — zero float math in the entire pipeline.
+     *
+     * @param pcmBuffer Raw PCM bytes (interleaved, little-endian)
+     * @param encoding  Media3 PCM encoding constant (C.ENCODING_PCM_16BIT, etc.)
+     */
+    fun writeRaw(pcmBuffer: ByteArray, encoding: Int) {
+        if (nativeHandle == 0L) return
+        val inputBitDepth = when (encoding) {
+            2 -> 16   // C.ENCODING_PCM_16BIT
+            0x15 -> 24 // C.ENCODING_PCM_24BIT
+            0x16 -> 32 // C.ENCODING_PCM_32BIT
+            else -> return
+        }
+        nativeUsbAudioWriteRaw(nativeHandle, pcmBuffer, inputBitDepth)
+    }
+
+    /**
      * Stop accepting new writes. Does NOT drain the pipeline.
      * Call [drainUrbs] after this to wait for all in-flight URBs to complete.
      */
@@ -158,6 +179,7 @@ class UsbAudioStream(
     private external fun nativeUsbAudioSetSampleRate(handle: Long, sampleRateHz: Int, clockSourceId: Int): Boolean
     private external fun nativeUsbAudioStart(handle: Long): Boolean
     private external fun nativeUsbAudioWrite(handle: Long, pcmBuffer: FloatArray)
+    private external fun nativeUsbAudioWriteRaw(handle: Long, pcmBuffer: ByteArray, inputBitDepth: Int)
     private external fun nativeUsbAudioStop(handle: Long)
     private external fun nativeDrainUrbs(handle: Long): Int
     private external fun nativeUsbAudioDestroy(handle: Long)

@@ -180,10 +180,16 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // Initialize the RenderersFactory once.
         renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableOffload: Boolean): AudioSink {
-                // Force float output when USB bit-perfect is active. FFmpeg normalizes
-                // int→float by dividing by 2^N (exact in float32 for 16/24-bit).
-                // Our C++ reconverts by multiplying by 2^N — exact round-trip.
-                val hiresEnabled = AudioPreferences.isHiresOutputEnabled() || AudioPreferences.isBitPerfectUsbEnabled()
+                // Determine float output based on decoder choice:
+                // - libFLAC: enableFloatOutput=false → delivers raw int (true bit-perfect, zero float)
+                // - FFmpeg: enableFloatOutput=true → delivers float (bit-perfect via ×2^N round-trip)
+                val useLibFlac = AudioPreferences.isBitPerfectUsbEnabled()
+                        && AudioPreferences.getFlacDecoder() == AudioPreferences.FLAC_LIBFLAC
+                val hiresEnabled = if (useLibFlac) {
+                    false  // libFLAC delivers raw int — no float needed
+                } else {
+                    AudioPreferences.isHiresOutputEnabled() || AudioPreferences.isBitPerfectUsbEnabled()
+                }
 
                 // Check if the user WANTS to preserve surround sound for their USB DAC
                 // You'd add this boolean to your AudioPreferences

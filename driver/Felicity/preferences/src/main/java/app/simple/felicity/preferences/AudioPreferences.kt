@@ -155,4 +155,21 @@ object AudioPreferences {
     fun getCurrentTrackBitDepth(): Int {
         return SharedPreferences.getSharedPreferences().getInt(CURRENT_TRACK_BIT_DEPTH, 0)
     }
+
+    // --------------------------------------------------------------------------------------------- //
+
+    private const val FLAC_DECODER = "flac_decoder"
+
+    /** libFLAC native decoder (raw int, zero float — true bit-perfect) */
+    const val FLAC_LIBFLAC = 0
+    /** FFmpeg decoder (float path, ×2^N round-trip) */
+    const val FLAC_FFMPEG = 1
+
+    fun setFlacDecoder(decoder: Int) {
+        SharedPreferences.getSharedPreferences().edit { putInt(FLAC_DECODER, decoder) }
+    }
+
+    fun getFlacDecoder(): Int {
+        return SharedPreferences.getSharedPreferences().getInt(FLAC_DECODER, FLAC_LIBFLAC)
+    }
 }

@@ -9,15 +9,9 @@ import java.util.concurrent.TimeUnit
  * Dedicated thread for USB audio streaming, decoupled from ExoPlayer's
  * render thread.
  *
- * Problem: ExoPlayer's delegate AudioTrack (muted, routed to speaker)
- * blocks the render thread for ~75ms per buffer. When the delegate
- * returns consumed=false (up to 13 seconds), no new data reaches USB
- * and the DAC plays silence.
- *
- * Solution: A producer-consumer queue between the render thread and
- * a dedicated USB thread. The render thread enqueues PCM data (~0ms),
- * then feeds the delegate. The USB thread pulls from the queue and
- * writes to the DAC at the DAC's own clock rate (via reap backpressure).
+ * Supports two buffer types:
+ * - [FloatBuffer]: float PCM from FFmpeg (MP3, AAC, FLAC via float path)
+ * - [RawBuffer]: raw integer PCM from libFLAC (zero float, true bit-perfect)
  *
  * @param usbStream The native USB audio stream to write to.
  *                  Must only be accessed from the USB thread.
@@ -26,33 +20,32 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
 
     companion object {
         private const val TAG = "UsbStreamingThread"
-
-        /** Queue capacity in buffers. At ~85ms per buffer, 128 buffers ≈ 10.8 seconds.
-         *  Large enough to absorb the initial burst when ExoPlayer fills the queue
-         *  faster than the USB thread can consume (during pipeline fill). */
         private const val QUEUE_CAPACITY = 128
-
-        /** Poll timeout — thread checks running flag at this interval when idle. */
         private const val POLL_TIMEOUT_MS = 100L
     }
 
-    private val audioQueue = ArrayBlockingQueue<FloatArray>(QUEUE_CAPACITY)
+    /** Sealed class for type-safe audio buffer queueing. */
+    private sealed class AudioBuffer {
+        class FloatBuffer(val data: FloatArray) : AudioBuffer()
+        class RawBuffer(val data: ByteArray, val encoding: Int) : AudioBuffer()
+    }
+
+    private val audioQueue = ArrayBlockingQueue<AudioBuffer>(QUEUE_CAPACITY)
 
     @Volatile
     private var running = false
     private var thread: Thread? = null
+    private var dropCount = 0
 
-    /**
-     * Start the USB streaming thread. Must be called after [UsbAudioStream.start].
-     */
     fun start() {
         running = true
         thread = Thread({
             Log.i(TAG, "USB streaming thread started")
             while (running) {
-                val buf = audioQueue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                if (buf != null) {
-                    usbStream.write(buf)
+                when (val buf = audioQueue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    is AudioBuffer.FloatBuffer -> usbStream.write(buf.data)
+                    is AudioBuffer.RawBuffer -> usbStream.writeRaw(buf.data, buf.encoding)
+                    null -> {}
                 }
             }
             Log.i(TAG, "USB streaming thread exited")
@@ -62,16 +55,12 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
         }
     }
 
-    /**
-     * Enqueue a PCM buffer for USB playback. Non-blocking.
-     * If the queue is full, drops the oldest buffer to make room.
-     */
-    private var dropCount = 0
-
+    /** Enqueue float PCM (FFmpeg path). Non-blocking, drop-oldest on full. */
     fun enqueue(floatBuf: FloatArray) {
-        if (!audioQueue.offer(floatBuf)) {
-            audioQueue.poll()           // drop oldest
-            audioQueue.offer(floatBuf)  // guaranteed space
+        val buf = AudioBuffer.FloatBuffer(floatBuf)
+        if (!audioQueue.offer(buf)) {
+            audioQueue.poll()
+            audioQueue.offer(buf)
             dropCount++
             if (dropCount <= 3 || dropCount % 100 == 0) {
                 Log.w(TAG, "Queue full, dropped buffer #$dropCount")
@@ -79,17 +68,23 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
         }
     }
 
-    /**
-     * Clear the queue. Called on seek/flush to discard stale audio.
-     */
+    /** Enqueue raw integer PCM (libFLAC path). Non-blocking, drop-oldest on full. */
+    fun enqueueRaw(rawBytes: ByteArray, encoding: Int) {
+        val buf = AudioBuffer.RawBuffer(rawBytes, encoding)
+        if (!audioQueue.offer(buf)) {
+            audioQueue.poll()
+            audioQueue.offer(buf)
+            dropCount++
+            if (dropCount <= 3 || dropCount % 100 == 0) {
+                Log.w(TAG, "Queue full, dropped raw buffer #$dropCount")
+            }
+        }
+    }
+
     fun flush() {
         audioQueue.clear()
     }
 
-    /**
-     * Stop the thread and clear the queue. Blocks until thread exits
-     * (up to 2 seconds). Must be called before releasing the USB stream.
-     */
     fun stop() {
         running = false
         audioQueue.clear()
