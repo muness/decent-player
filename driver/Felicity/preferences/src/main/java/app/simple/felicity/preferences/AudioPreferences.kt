@@ -136,4 +136,23 @@ object AudioPreferences {
     fun isBitPerfectUsbEnabled(): Boolean {
         return SharedPreferences.getSharedPreferences().getBoolean(BIT_PERFECT_USB_ENABLED, false)
     }
+
+    // --------------------------------------------------------------------------------------------- //
+
+    private const val CURRENT_TRACK_BIT_DEPTH = "current_track_bit_depth"
+
+    /**
+     * Set the current track's source bit depth (from file metadata, e.g., jAudioTagger).
+     * Used by the USB bit-perfect path to select the correct USB alt setting.
+     */
+    fun setCurrentTrackBitDepth(bitDepth: Int) {
+        SharedPreferences.getSharedPreferences().edit { putInt(CURRENT_TRACK_BIT_DEPTH, bitDepth) }
+    }
+
+    /**
+     * Returns the current track's source bit depth (16, 24, 32), or 0 if unknown.
+     */
+    fun getCurrentTrackBitDepth(): Int {
+        return SharedPreferences.getSharedPreferences().getInt(CURRENT_TRACK_BIT_DEPTH, 0)
+    }
 }

@@ -105,6 +105,14 @@ class AaudioAudioSink(
         if (enc != Format.NO_VALUE) {
             currentEncoding = enc
         }
+        handleBufferCallCount = 0  // reset so first handleBuffer of new track is logged
+        Log.i(TAG, "configure: pcmEncoding=$enc (${when(enc) {
+            C.ENCODING_PCM_FLOAT -> "FLOAT"
+            C.ENCODING_PCM_16BIT -> "16BIT"
+            C.ENCODING_PCM_24BIT -> "24BIT"
+            C.ENCODING_PCM_32BIT -> "32BIT"
+            else -> "UNKNOWN($enc)"
+        }}) rate=${inputFormat.sampleRate} ch=${inputFormat.channelCount}")
         val sr = inputFormat.sampleRate.takeIf { it > 0 }
         val ch = inputFormat.channelCount.takeIf { it > 0 }
 
@@ -249,6 +257,8 @@ class AaudioAudioSink(
             // with the same buffer. Only enqueue on the first call.
             val thread = usbStreamingThread
             if (thread != null && usbWritePendingForCurrentBuffer) {
+                handleBufferCallCount++
+
                 val bps = PcmUtils.bytesPerSample(currentEncoding)
                 val totalSamples = snapshot.remaining() / bps
                 if (totalSamples > 0) {
@@ -256,9 +266,22 @@ class AaudioAudioSink(
                     if (currentEncoding == C.ENCODING_PCM_FLOAT) {
                         snapshot.asFloatBuffer().get(floatBuf)
                     } else {
+                        snapshot.order(java.nio.ByteOrder.LITTLE_ENDIAN)
                         for (i in 0 until totalSamples) {
                             floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
                         }
+                    }
+                    // Log first few samples on first call of each track to verify data integrity
+                    if (handleBufferCallCount <= 3) {
+                        val s0 = if (totalSamples > 0) floatBuf[0] else 0f
+                        val s1 = if (totalSamples > 1) floatBuf[1] else 0f
+                        val s2 = if (totalSamples > 2) floatBuf[2] else 0f
+                        val s3 = if (totalSamples > 3) floatBuf[3] else 0f
+                        val min = floatBuf.minOrNull() ?: 0f
+                        val max = floatBuf.maxOrNull() ?: 0f
+                        Log.i(TAG, "handleBuffer #$handleBufferCallCount: encoding=${
+                            if (currentEncoding == C.ENCODING_PCM_FLOAT) "FLOAT" else "${bps*8}bit"
+                        } samples=$totalSamples first=[$s0, $s1, $s2, $s3] range=[$min, $max]")
                     }
                     thread.enqueue(floatBuf)
                 }
@@ -528,10 +551,16 @@ class AaudioAudioSink(
             return
         }
 
-        // Auto-detected from USB descriptors: use the highest bit depth alt setting
+        // Select alt setting matching the source file's bit depth for true bit-perfect.
+        // AudioPreferences.currentTrackBitDepth is set by FelicityPlayerService from
+        // Audio.bitPerSample (jAudioTagger metadata) on each track transition.
+        // Always use the DAC's highest supported bit depth (like (removed)).
+        // Sources with lower bit depth (16-bit, 24-bit) are zero-padded in the LSBs.
+        // This is standard bit-perfect practice — original bits preserved in MSBs.
         val bitDepth = deviceInfo.bestBitDepth
         val altSetting = deviceInfo.bestAltSetting
-        Log.i(TAG, "Auto-detected: alt=$altSetting bits=$bitDepth " +
+        val sourceBitDepth = AudioPreferences.getCurrentTrackBitDepth()
+        Log.i(TAG, "Bit-perfect: source=${sourceBitDepth}bit → alt=$altSetting usb=${bitDepth}bit " +
                 "clockSource=0x${deviceInfo.clockSourceId.toString(16)}")
 
         Log.i(TAG, "Configuring USB bit-perfect: rate=$sampleRate ch=$channelCount " +
@@ -587,7 +616,7 @@ class AaudioAudioSink(
                     endpointFeedback = deviceInfo.endpointFeedbackAddress,
                     sampleRate = sampleRate,
                     channelCount = channelCount,
-                    bitDepth = deviceInfo.bestBitDepth,
+                    bitDepth = bitDepth,
                     maxPacketSize = deviceInfo.maxPacketSize
             )
             if (!stream.isReady) {

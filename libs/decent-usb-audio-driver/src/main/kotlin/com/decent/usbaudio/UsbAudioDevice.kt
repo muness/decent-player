@@ -363,8 +363,12 @@ class UsbAudioDevice private constructor(private val context: Context) {
      *
      * @return Pair(altSetting, bitDepth), or Pair(1, 16) as default.
      */
+    /** Parsed alt setting: (altNumber, bitResolution) */
+    private var parsedAltSettings: List<Pair<Int, Int>> = emptyList()
+
     private fun parseBestAltSetting(conn: UsbDeviceConnection): Pair<Int, Int> {
         val raw = conn.rawDescriptors ?: return Pair(1, 16)
+        val altSettings = mutableListOf<Pair<Int, Int>>()
 
         var i = 0
         var currentAlt = 0
@@ -392,11 +396,13 @@ class UsbAudioDevice private constructor(private val context: Context) {
             if (inAudioStreaming && bDescriptorType == 0x24 && bLength >= 6) {
                 val bDescriptorSubtype = raw[i + 2].toInt() and 0xFF
                 if (bDescriptorSubtype == 0x02) {
-                    // UAC2 Format Type I: byte[3]=bFormatType, byte[4]=bSubslotSize, byte[5]=bBitResolution
                     val bSubslotSize = raw[i + 4].toInt() and 0xFF
                     val bBitResolution = raw[i + 5].toInt() and 0xFF
                     Log.i(TAG, "parseBestAltSetting: alt=$currentAlt subslotSize=$bSubslotSize bitResolution=$bBitResolution")
 
+                    if (currentAlt > 0) {
+                        altSettings.add(Pair(currentAlt, bBitResolution))
+                    }
                     if (bBitResolution > bestBits && currentAlt > 0) {
                         bestBits = bBitResolution
                         bestAlt = currentAlt
@@ -407,8 +413,44 @@ class UsbAudioDevice private constructor(private val context: Context) {
             i += bLength
         }
 
-        Log.i(TAG, "parseBestAltSetting: best alt=$bestAlt bits=$bestBits")
+        parsedAltSettings = altSettings
+        Log.i(TAG, "parseBestAltSetting: best alt=$bestAlt bits=$bestBits, all=$altSettings")
         return Pair(bestAlt, bestBits)
+    }
+
+    /**
+     * Find the alt setting that matches the given source bit depth exactly.
+     * If no exact match, returns the next higher bit depth.
+     * Fallback: returns the best (highest) alt setting.
+     *
+     * @return Pair(altSetting, bitDepth)
+     */
+    fun findAltSettingForBitDepth(targetBitDepth: Int): Pair<Int, Int> {
+        if (parsedAltSettings.isEmpty()) {
+            val info = cachedDeviceInfo ?: return Pair(1, 16)
+            return Pair(info.bestAltSetting, info.bestBitDepth)
+        }
+
+        // Exact match
+        val exact = parsedAltSettings.firstOrNull { it.second == targetBitDepth }
+        if (exact != null) {
+            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): exact match alt=${exact.first}")
+            return exact
+        }
+
+        // Next higher
+        val higher = parsedAltSettings
+                .filter { it.second > targetBitDepth }
+                .minByOrNull { it.second }
+        if (higher != null) {
+            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): next higher alt=${higher.first} bits=${higher.second}")
+            return higher
+        }
+
+        // Fallback to best
+        val best = parsedAltSettings.maxByOrNull { it.second } ?: Pair(1, 16)
+        Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): fallback to best alt=${best.first} bits=${best.second}")
+        return best
     }
 
     /**

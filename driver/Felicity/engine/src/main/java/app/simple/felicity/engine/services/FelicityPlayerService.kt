@@ -72,6 +72,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 import kotlin.math.roundToInt
 
@@ -826,10 +827,22 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 }
             }
 
-            // Record play event for the newly active song.
+            // Record play event for the newly active song and propagate bit depth.
             mediaItem?.let { item ->
                 previousItemMediaId = item.mediaId
                 val audioId = item.mediaId.toLongOrNull() ?: return@let
+
+                // Set bit depth SYNCHRONOUSLY before ExoPlayer calls configure().
+                // This must complete before the audio renderer processes the new track,
+                // otherwise the USB bit-perfect path reads the wrong encoding.
+                if (AudioPreferences.isBitPerfectUsbEnabled()) {
+                    runBlocking(Dispatchers.IO) {
+                        val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
+                        AudioPreferences.setCurrentTrackBitDepth(audio.bitPerSample.toInt())
+                        Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}")
+                    }
+                }
+
                 serviceScope.launch(Dispatchers.IO) {
                     val audio = audioRepository.getAudioById(audioId) ?: return@launch
                     songStatRepository.recordPlay(audio.hash)
