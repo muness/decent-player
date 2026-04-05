@@ -2,7 +2,7 @@
 
 > A "Decent" Android music player with bit-perfect USB audio output.
 
-Ships a custom userspace USB Audio Class 2.0 driver that bypasses the entire Android audio stack — no resampling, no mixer, no compromise.
+Ships a custom direct USB Audio Class 2.0 driver that bypasses the entire Android audio stack — no resampling, no mixer, no compromise.
 
 ---
 
@@ -24,7 +24,7 @@ Two standalone libraries that any Android app can use:
 Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, and float-to-integer conversion with bit-perfect math.
 
 ### `com.decent:usb-audio-wrapper-media3`
-Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, and (removed)-matched xHCI transition sequences. Five lines to integrate.
+Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, and xHCI-verified transition sequences. Five lines to integrate.
 
 ```kotlin
 // That's it. Bit-perfect USB audio in your Media3 app.
@@ -46,7 +46,7 @@ See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start gui
 - Supports any sample rate the DAC advertises (44.1kHz — 384kHz)
 - Works on **stock Android 10+**, no root required
 - Pipeline of 20 isochronous URBs with dedicated streaming thread for glitch-free output
-- (removed)-matched rate transition sequence (from xHCI ftrace analysis)
+- Protocol-matched rate transition sequence (from xHCI ftrace analysis)
 - Bit-perfect float-to-integer conversion (x2^N scaling, mathematically lossless for 16/24-bit)
 
 ### Verified
@@ -71,18 +71,9 @@ Streaming thread:       dedicated, decoupled from ExoPlayer
 
 ---
 
-## Prior art
+## Why this exists
 
-Before this, bit-perfect USB audio on Android was exclusive to closed-source commercial apps:
-
-| App | Price | Source | Approach |
-|-----|-------|--------|----------|
-| USB Audio Player Pro | $8 | Closed | Custom USB driver |
-
-
-| **decent-player** | **Free** | **Open** | **Custom USB driver** |
-
-Google's own Media3/ExoPlayer team has an [open issue](https://github.com/androidx/media/issues/415) requesting this since 2023. No open-source solution existed.
+Before this, bit-perfect USB audio on Android was not available as open-source. Google's own Media3/ExoPlayer team has an [open issue](https://github.com/androidx/media/issues/415) requesting this since 2023. No open-source solution existed.
 
 **Until now.**
 
@@ -95,7 +86,7 @@ Google's own Media3/ExoPlayer team has an [open issue](https://github.com/androi
 This repo contains:
 - Two standalone libraries (`libs/`) ready for integration in any Media3 app
 - Complete technical documentation of the USB audio driver and libraries
-- Investigation notes, (removed) reverse engineering, xHCI ftrace analysis
+- Investigation notes, USB protocol analysis, xHCI ftrace analysis
 - Proof-of-concept integration inside a Felicity Music Player fork (`driver/Felicity/`)
 
 ---
@@ -119,7 +110,7 @@ This repo contains:
 | [Technical Architecture](docs/driver/03-technical-architecture.md) | Data flow, components, USB protocol details |
 | [Five Critical Bugs](docs/driver/04-five-critical-bugs.md) | Each bug that caused silence — and the fix |
 | [Cayin RU7 Reference](docs/driver/05-cayin-ru7-hardware-reference.md) | Complete hardware analysis with raw USB descriptors |
-| [(removed) Analysis](docs/driver/06-uapp-reverse-engineering.md) | How USB Audio Player Pro works under the hood |
+| [USB Protocol Analysis](docs/driver/06-usb-protocol-analysis.md) | USB audio protocol analysis via xHCI ftrace |
 | [Verification Guide](docs/driver/07-verification-and-diagnostics.md) | How to prove bit-perfect is actually happening |
 | [Descriptor Parsing](docs/driver/08-usb-descriptor-parsing.md) | Auto-detecting DAC capabilities from USB descriptors |
 | [Future Work](docs/driver/09-future-work.md) | Known limitations and roadmap |
@@ -130,8 +121,8 @@ This repo contains:
 
 | File | What's inside |
 |------|---------------|
-| [(removed) xHCI Trace](docs/hardware/uapp-xhci-trace-adele-kansas-persona.txt) | 449k-line ftrace capture of (removed)'s exact transition sequence |
-| [(removed) Behavior Analysis](docs/hardware/uapp-behavior-analysis.md) | Analysis of (removed)'s USB protocol behavior |
+| [xHCI Trace — Rate Transitions](docs/hardware/xhci-trace-rate-transitions.txt) | 449k-line ftrace capture of exact transition sequence |
+| [USB DAC Behavior Analysis](docs/hardware/usb-dac-behavior-analysis.md) | Analysis of USB audio protocol behavior on Samsung S26 Ultra |
 | [Cayin RU7 USB Analysis](docs/hardware/cayin-ru7-usb-analysis.md) | Raw USB descriptor dump and clock source mapping |
 
 ---

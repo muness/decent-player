@@ -1,6 +1,6 @@
 # Cayin RU7 USB Audio Analysis — Samsung Galaxy S26 Ultra (Android 16, API 36)
 
-Data collected 2026-04-03 while (removed) was playing via USB.
+Data collected 2026-04-03 while a a direct USB driver was playing via USB.
 
 ## USB Device Descriptors
 
@@ -67,23 +67,23 @@ From `/vendor/etc/audio/sku_alor/audio_policy_configuration.xml`:
 
 **No DIRECT or BIT_PERFECT profiles on USB.** The official API paths are dead.
 
-## (removed) Behavior Analysis (AudioFlinger Dump)
+## USB Protocol Behavior Analysis (AudioFlinger Dump)
 
-### Key finding: (removed) bypasses AudioFlinger entirely
+### Key finding: Direct USB driver bypasses AudioFlinger entirely
 
-- (removed) PID 23417, UID 10404
+- Direct USB driver PID 23417, UID 10404
 - **Zero active AudioTracks in any AudioFlinger output thread** while playing
 - USB device permission granted: `device_name=/dev/bus/usb/001/002, uids=10404`
 - Log confirms: `m_useUSBAudio = true`
 - Uses a "ghost" AudioTrack for MediaSession/notification integration only
 - On pause/resume: `AudioTrack: stop(422)` / `restoreTrack_l(423): dead IAudioTrack, PCM, creating a new one from setOutputDevice()`
 
-### AudioFlinger USB threads (Samsung-created, not (removed))
+### AudioFlinger USB threads (Samsung-created, not the direct USB driver)
 
-- `AudioOut_145` (MIXER): 384000 Hz, PCM 32-bit, **Standby=yes** (not used by (removed))
-- `AudioOut_13D` (DIRECT): 8000 Hz, PCM Float, **Standby=yes** (not used by (removed))
+- `AudioOut_145` (MIXER): 384000 Hz, PCM 32-bit, **Standby=yes** (not used by direct USB driver)
+- `AudioOut_13D` (DIRECT): 8000 Hz, PCM Float, **Standby=yes** (not used by direct USB driver)
 - Samsung effects on USB mixer: SoundBoosterPlus, SoundBoosterEQ, VoiceBooster, Dolby_FX, SoundAlivePlus
 
 ### Conclusion
 
-(removed) uses direct USB userspace communication via UsbManager → UsbDeviceConnection → isochronous transfers. It does NOT use AudioFlinger, AudioTrack, AAudio, or any Android audio framework for actual sound output.
+The direct USB driver communicates directly via UsbManager -> UsbDeviceConnection -> isochronous transfers. It does NOT use AudioFlinger, AudioTrack, AAudio, or any Android audio framework for actual sound output.

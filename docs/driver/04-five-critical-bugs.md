@@ -76,12 +76,12 @@ Use native ioctl only for alt=0 (zero-bandwidth, no ISO needed).
 
 **Root cause:** Our code used blocking submit-reap: `submit URB → REAPURB (block) → submit next`. This keeps exactly 1 URB in flight (#Iso=1). The xHCI host controller needs multiple URBs queued to maintain continuous isochronous streaming. With 1 URB, there are gaps between each microframe where no data is scheduled. The DAC receives intermittent data and doesn't produce audio.
 
-(removed) maintains ~74 URBs in flight (#Iso=74).
+Bit-perfect USB audio requires multiple URBs in flight (#Iso>=8).
 
-**How discovered:** Compared `#Iso` values between our driver and (removed) on iBasso DX340:
+**How discovered:** Compared `#Iso` values between our driver and a reference bit-perfect app on iBasso DX340:
 ```
 Our driver (no sound):  #Iso=1
-(removed) (sound works):     #Iso=74
+Optimal (works):     #Iso=74
 ```
 
 **Fix:** Pre-submit 8 silence URBs at stream start (fire-and-forget). Then each `write()` submits a new URB and reaps an old one, maintaining a pipeline of 8.

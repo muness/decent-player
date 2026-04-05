@@ -11,7 +11,7 @@ The core technical documentation for the bit-perfect USB audio driver.
 | 🏗️ | [Technical Architecture](driver/03-technical-architecture.md) | Data flow, components, USB protocol details |
 | 🐛 | [Five Critical Bugs](driver/04-five-critical-bugs.md) | Each bug that caused silence — and the fix |
 | 🔧 | [Cayin RU7 Reference](driver/05-cayin-ru7-hardware-reference.md) | Complete hardware analysis with raw USB descriptors |
-| 🕵️ | [(removed) Analysis](driver/06-uapp-reverse-engineering.md) | How USB Audio Player Pro works under the hood |
+| 🕵️ | [USB Protocol Analysis](driver/06-usb-protocol-analysis.md) | USB audio protocol analysis via xHCI ftrace |
 | ✅ | [Verification Guide](driver/07-verification-and-diagnostics.md) | How to prove bit-perfect is actually happening |
 | 🧬 | [Descriptor Parsing](driver/08-usb-descriptor-parsing.md) | Auto-detecting DAC capabilities from USB descriptors |
 | 🔮 | [Future Work](driver/09-future-work.md) | Known limitations and roadmap |
@@ -34,4 +34,4 @@ Raw notes from the development session.
 |----------|-------------|
 | [Cayin RU7 USB Analysis](hardware/cayin-ru7-usb-analysis.md) | Full USB dump analysis |
 | [Clock Source Discovery](hardware/cayin-ru7-clock-source.md) | How we found the correct clock entity ID |
-| [(removed) Behavior](hardware/uapp-behavior-analysis.md) | (removed) runtime observation on Samsung S26 Ultra |
+| [USB DAC Behavior](hardware/usb-dac-behavior-analysis.md) | USB audio runtime observation on Samsung S26 Ultra |

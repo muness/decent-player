@@ -22,14 +22,14 @@ This document chronicles every step, dead end, and breakthrough in the order the
 1. `setPreferredMixerAttributes()` with `MIXER_BEHAVIOR_DEFAULT` — partial win, not bit-perfect
 2. `AUDIO_OUTPUT_FLAG_DIRECT` via `dlsym` — Samsung has no DIRECT profile for USB
 3. Root-based audio policy modification — not viable for distribution
-4. **Direct USB driver via `UsbManager`** — the (removed) approach
+4. **Direct USB driver via `UsbManager`** — direct USB approach
 
-**(removed) Analysis (via `dumpsys` while (removed) played):**
-- (removed) has **zero AudioTracks** in AudioFlinger for USB output
-- (removed) has **USB device permission** via `UsbManager`
+**USB protocol analysis (via `dumpsys` during direct USB audio playback):**
+- The app had **zero AudioTracks** in AudioFlinger for USB output
+- The app had **USB device permission** via `UsbManager`
 - USB device driver shows `usbfs` (not `snd-usb-audio`)
-- (removed) uses a ghost AudioTrack on the **speaker** for MediaSession
-- Confirmed: (removed) bypasses Android audio stack entirely
+- A ghost AudioTrack on the **speaker** was used for MediaSession
+- Confirmed: direct USB approach bypasses Android audio stack entirely
 
 **Decision:** Implement direct USB audio driver via `UsbManager` + isochronous transfers.
 
@@ -116,7 +116,7 @@ cat /sys/kernel/debug/usb/devices
 Showed:
 ```
 B: Alloc=0/800 us (0%), #Int=0, #Iso=0    ← OUR DRIVER
-B: Alloc=0/800 us (0%), #Int=0, #Iso=74   ← (removed)
+B: Alloc=0/800 us (0%), #Int=0, #Iso=74   ← optimal
 ```
 
 **Root cause:** Native `USBDEVFS_SETINTERFACE` ioctl does NOT allocate isochronous bandwidth in the xHCI host controller. Only the Java `UsbDeviceConnection.setInterface()` properly allocates bandwidth.
@@ -125,7 +125,7 @@ B: Alloc=0/800 us (0%), #Int=0, #Iso=74   ← (removed)
 
 ## Phase 9: The Pipeline Bug (CRITICAL)
 
-**Problem:** With ISO bandwidth allocated, still no sound. `#Iso=1` (our driver) vs `#Iso=74` ((removed)).
+**Problem:** With ISO bandwidth allocated, still no sound. `#Iso=1` (our driver) vs `#Iso=74` (optimal).
 
 **Root cause:** Our blocking submit-reap pattern (`submit → REAPURB → submit`) only keeps 1 URB in flight at a time. Between URBs, the xHCI endpoint has no data. The DAC doesn't produce audio with intermittent data.
 
@@ -149,12 +149,12 @@ B: Alloc=0/800 us (0%), #Int=0, #Iso=74   ← (removed)
 | Time | Event |
 |------|-------|
 | 00:47 | First diagnostic: no BIT_PERFECT support on S26 Ultra |
-| 01:04 | (removed) analysis: confirmed direct USB approach |
+| 01:04 | USB protocol analysis: confirmed direct USB approach |
 | 01:55 | First USB driver build: URBs accepted, no sound |
 | 01:57 | Permission bug fixed |
 | 02:00 | AudioFlinger conflict discovered |
 | 02:20 | Clock source 0x0B "works" but feedback shows 384kHz |
-| 02:35 | (removed) logs captured on S26 |
+| 02:35 | USB protocol logs captured on S26 |
 | 03:20 | USBDEVFS_RESET attempted (kernel race condition) |
 | 16:50 | iBasso DX340 connected — USB descriptors read |
 | 16:58 | Clock Source ID = 0x05 discovered! Clock changes to 44.1kHz! |

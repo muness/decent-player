@@ -16,7 +16,7 @@ O Android, por padrão, roteia todo áudio pelo **AudioFlinger** (mixer do siste
 
 Isso destrói a qualidade original do arquivo — um FLAC 24-bit/96kHz sai como 16-bit/48kHz genérico.
 
-Até hoje, a única solução é o **USB Audio Player Pro ((removed))**, que usa um **driver USB proprietário** para contornar completamente o Android. Funciona, mas a UI é horrível e o código é fechado.
+Até hoje, a única solução são **apps comerciais fechados** que usam **drivers USB proprietários** para contornar completamente o Android. Funcionam, mas são todos de código fechado.
 
 ## A Solução: API Oficial do Android 14 (API 34)
 

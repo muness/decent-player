@@ -65,7 +65,41 @@ Create `res/xml/usb_audio_device_filter.xml`:
 </resources>
 ```
 
-### Step 3: Create RenderersFactory with UsbAudioSink
+### Step 3: Handle USB Device Attach in Your Activity
+
+When a USB DAC is connected, your Activity receives the `USB_DEVICE_ATTACHED` intent. You must handle it immediately to claim the device before the kernel's `snd-usb-audio` driver binds (~3ms window):
+
+```kotlin
+import com.decent.usbaudio.UsbAudioPermissionHelper
+
+class MainActivity : AppCompatActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Handle USB device attached (app launched by USB connect)
+        handleUsbDeviceAttached(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Handle USB device attached (app already running)
+        handleUsbDeviceAttached(intent)
+    }
+
+    private fun handleUsbDeviceAttached(intent: Intent) {
+        // UsbAudioPermissionHelper handles:
+        // 1. Checking if intent is USB_DEVICE_ATTACHED
+        // 2. Finding the USB audio device
+        // 3. Requesting permission if needed
+        // 4. Claiming the device (openDevice) to prevent kernel driver binding
+        UsbAudioPermissionHelper.handleIntent(applicationContext, intent)
+    }
+}
+```
+
+`UsbAudioPermissionHelper` is provided by the `usb-audio-driver` library. It handles the full flow: detect audio device, check/request permission, and claim the device.
+
+### Step 4: Create RenderersFactory with UsbAudioSink
 
 In your player service or activity, create a custom `DefaultRenderersFactory` that:
 1. Forces FFmpeg decoder (for bit-perfect float output)
@@ -123,7 +157,7 @@ class MyPlayerService : ... {
 }
 ```
 
-### Step 4: Build the ExoPlayer
+### Step 5: Build the ExoPlayer
 
 ```kotlin
 val player = ExoPlayer.Builder(this)
@@ -131,7 +165,7 @@ val player = ExoPlayer.Builder(this)
     .build()
 ```
 
-### Step 5: Set Track Bit Depth on Each Track Transition
+### Step 6: Set Track Bit Depth on Each Track Transition
 
 The sink needs to know the source file's bit depth so it can log and verify bit-perfect delivery. Set it **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
 
@@ -156,7 +190,7 @@ player.addListener(object : Player.Listener {
 
 **Why synchronous?** ExoPlayer calls `onMediaItemTransition` → then `configure()` on the sink. If `trackBitDepth` isn't set before `configure()` runs, the sink uses the previous track's bit depth for logging/verification.
 
-### Step 6: Configuration Options (Optional)
+### Step 7: Configuration Options (Optional)
 
 The default config works for most cases. Customize if needed:
 
@@ -185,7 +219,7 @@ The `UsbAudioSink` manages the USB stream lifecycle automatically:
 |-------|-------------|
 | `configure(format)` | Opens USB device, claims interface, sets sample rate via UAC2 sequence, starts streaming thread |
 | Track change (same rate) | Cache hit — stream continues, no reconfiguration |
-| Track change (different rate) | Full (removed) transition: stop thread → drain URBs → setAlt(0) → SET_CUR → CLOCK_VALID → setAlt(0) → setAlt(N) → sleep(50ms) → start |
+| Track change (different rate) | Full UAC2 transition: stop thread -> drain URBs -> setAlt(0) -> SET_CUR -> CLOCK_VALID -> setAlt(0) -> setAlt(N) -> sleep(50ms) -> start |
 | `flush()` | Clears the streaming queue (for seeks/discontinuities) |
 | `reset()` | USB stream **survives** — ExoPlayer calls reset() frequently on track changes, killing USB here causes audio to briefly route to speaker |
 | `release()` | Full cleanup: stop streaming thread, drain all URBs, release native resources |
@@ -247,7 +281,7 @@ val deviceInfo = usbAudioDevice.openDevice(usbDevice) ?: return
 
 ### Configure Sample Rate (UAC2 Transition Sequence)
 
-This sequence must be followed exactly. It matches (removed)'s behavior confirmed via xHCI ftrace:
+This sequence must be followed exactly. It was confirmed via xHCI ftrace analysis:
 
 ```kotlin
 // Step 1: FREE old ISO rings
@@ -259,7 +293,7 @@ usbAudioDevice.setSampleRate(96000)
 // Step 3: GET_CUR(CLOCK_VALID_CONTROL) — verify DAC clock locked
 val clockValid = usbAudioDevice.readClockValid()  // should return true
 
-// Step 4: Defensive reset ((removed) does this after SET_CUR)
+// Step 4: Defensive reset (required after SET_CUR per xHCI protocol analysis)
 usbAudioDevice.setAltSetting(0)
 
 // Step 5: ALLOC new ISO rings
@@ -269,7 +303,7 @@ usbAudioDevice.setAltSetting(deviceInfo.bestAltSetting)
 Thread.sleep(50)
 ```
 
-**Why this exact sequence?** The xHCI host controller uses Configure Endpoint Commands to allocate/free isochronous transfer rings. Sending URBs on a stale ring corrupts the host controller state. (removed)'s ftrace shows this exact 7-step sequence with two setAlt(0) calls — the second one after SET_CUR is critical for xHCI ring cleanup.
+**Why this exact sequence?** The xHCI host controller uses Configure Endpoint Commands to allocate/free isochronous transfer rings. Sending URBs on a stale ring corrupts the host controller state. xHCI ftrace analysis confirms this exact 7-step sequence with two setAlt(0) calls -- the second one after SET_CUR is critical for xHCI ring cleanup.
 
 ### Create and Start a Stream
 

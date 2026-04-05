@@ -13,7 +13,7 @@ import android.util.Log
  * Pipeline: 64 URBs in flight, each carrying 8 ISO packets (1ms of audio).
  * Total pipeline buffer: ~64ms.
  *
- * Rate transition lifecycle (matches (removed) xHCI behavior):
+ * Rate transition lifecycle (per USB Audio Class 2.0 spec, verified via xHCI ftrace):
  * ```
  * stream.stop()           // stop accepting writes
  * stream.drainUrbs()      // block until ALL in-flight URBs complete

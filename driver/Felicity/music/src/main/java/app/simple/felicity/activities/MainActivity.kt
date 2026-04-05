@@ -370,7 +370,7 @@ class MainActivity : BaseActivity(), MiniPlayerCallbacks {
     /**
      * Handle USB_DEVICE_ATTACHED intent. When a USB Audio device is connected,
      * immediately claim it to prevent the snd-usb-audio kernel driver from
-     * binding. This is the same approach used by USB Audio Player Pro.
+     * binding. This is required for direct USB audio output.
      *
      * The system sends this intent BEFORE the kernel driver binds, giving us
      * a window to claim the device exclusively for bit-perfect audio output.

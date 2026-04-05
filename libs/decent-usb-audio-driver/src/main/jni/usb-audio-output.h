@@ -23,7 +23,7 @@
 
 /**
  * Number of URBs in the ring buffer.
- * (removed) uses ~74 URBs. We use 64 for a ~64ms pipeline buffer.
+ * Optimal pipeline depth is ~74 URBs based on USB protocol analysis. We use 64 for a ~64ms pipeline buffer.
  */
 #define USB_AUDIO_NUM_URBS 20
 

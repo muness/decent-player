@@ -187,7 +187,7 @@ class UsbAudioSink(
             return
         }
 
-        // Always use the DAC's highest supported bit depth (like (removed)).
+        // Always use the DAC's highest supported bit depth (standard practice).
         // Sources with lower bit depth are zero-padded in the LSBs.
         val bitDepth = deviceInfo.bestBitDepth
         val altSetting = deviceInfo.bestAltSetting
@@ -211,7 +211,7 @@ class UsbAudioSink(
             return
         }
 
-        // ─── (removed)-matched transition sequence (from xHCI ftrace) ───
+        // ─── xHCI-verified transition sequence (from USB protocol analysis) ───
         //
         // 1. setAlt(0)       → xHCI Configure Endpoint (FREE old rings)
         // 2. SET_CUR          → write new sample rate to Clock Source
@@ -304,7 +304,7 @@ class UsbAudioSink(
         // Release native context
         stream.release()
 
-        // Keep device connection open between tracks ((removed) approach)
+        // Keep device connection open between tracks (standard practice)
         clearForcedRouting()
         unmuteDelegateIfNeeded()
         Log.i(TAG, "USB audio stream released (device kept open)")

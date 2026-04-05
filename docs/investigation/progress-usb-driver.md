@@ -44,10 +44,10 @@ de diferença) — o kernel AINDA binda antes de nós por ~3ms e configura o clo
 - Ou `setprop sys.usb.config "none"` antes de conectar
 - Requer root — não viável pra distribuição
 
-**Opção D: Investigar como (removed) realmente previne o kernel de bindar**
-- Talvez (removed) usa uma API privada do Android
-- Talvez registra como default handler de USB audio no manifest de forma especial
-- Talvez faz o claim numa etapa mais cedo do lifecycle USB do Android
+**Opção D: Investigar como apps comerciais previnem o kernel de bindar**
+- Talvez usam uma API privada do Android
+- Talvez registram como default handler de USB audio no manifest de forma especial
+- Talvez fazem o claim numa etapa mais cedo do lifecycle USB do Android
 
 ### Todos os arquivos do driver (em C:/tmp/Felicity)
 ```

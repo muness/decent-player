@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-03
 **Project:** DecentPlayer (fork of [Felicity Music Player](https://github.com/Hamza417/Felicity))
-**Achievement:** First open-source bit-perfect USB audio driver for Android, bypassing the entire Android audio stack (AudioFlinger, AudioTrack, AAudio, ALSA) via userspace isochronous USB transfers.
+**Achievement:** First open-source bit-perfect USB audio driver for Android, bypassing the entire Android audio stack (AudioFlinger, AudioTrack, AAudio, ALSA) via direct isochronous USB transfers.
 
 ## What We Built
 
@@ -35,8 +35,8 @@ When our driver is active:
 ## Prior Art
 
 Before this, the only apps achieving bit-perfect USB audio on Android were:
-- **USB Audio Player Pro ((removed))** — closed source, commercial ($8)
-
+- No open-source solution existed before this project
+- Some apps use `dlsym` hacks for partial bypass
 
 
 No open-source implementation existed. The Google Media3/ExoPlayer team has an open issue (#415) since 2023 requesting this feature.
@@ -47,7 +47,7 @@ No open-source implementation existed. The Google Media3/ExoPlayer team has an o
 2. **`USBDEVFS_URB_ISO_ASAP` flag** — without it, the xHCI host controller silently drops all isochronous packets
 3. **Java `setInterface()` for ISO bandwidth** — native `USBDEVFS_SETINTERFACE` does NOT allocate isochronous bandwidth in the xHCI scheduler
 4. **Pipeline of 8+ URBs** — the xHCI host controller requires multiple URBs in flight simultaneously; single submit-reap produces silence
-5. **32-bit PCM (alt=3) as default** — (removed) always uses 32-bit regardless of source bit depth; some DACs may not output audio on 16-bit alt settings
+5. **32-bit PCM (alt=3) as default** — 32-bit is the standard choice regardless of source bit depth; some DACs may not output audio on 16-bit alt settings
 
 ## Architecture
 

@@ -7,7 +7,7 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 - **True bit-perfect output** — no resampling, no format conversion, no volume scaling, no effects
 - **Automatic sample rate switching** — DAC switches to match the source file (44.1kHz, 48kHz, 96kHz, 192kHz, etc.)
 - **Automatic bit depth handling** — 16-bit and 24-bit sources are zero-padded to the DAC's native format
-- **Seamless track transitions** — (removed)-matched xHCI transition sequence for reliable rate changes
+- **Seamless track transitions** — xHCI-verified transition sequence for reliable rate changes
 - **Works with any USB Audio Class 2.0 DAC**
 
 ## Requirements

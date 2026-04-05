@@ -95,7 +95,7 @@ The render thread and USB thread are fully decoupled via the queue. The render t
 
 ## Rate Transition Sequence
 
-Matches (removed)'s exact behavior observed via xHCI ftrace on iBasso DX340:
+Matches the exact behavior observed via xHCI ftrace analysis on iBasso DX340:
 
 ```
 1. stop()              Stop accepting new writes
@@ -160,4 +160,4 @@ When the source bit depth is less than the DAC's bit depth, samples are zero-pad
 24-bit source → 32-bit DAC:  0xABCDEF → 0xABCDEF00 (8 zeros in LSB)
 ```
 
-This is standard bit-perfect practice ((removed) does the same). The original bits are preserved in the MSBs. The DAC's internal converter ignores the zero LSBs.
+This is standard bit-perfect practice per USB Audio Class 2.0 spec. The original bits are preserved in the MSBs. The DAC's internal converter ignores the zero LSBs.

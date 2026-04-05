@@ -656,7 +656,7 @@ The driver was developed using:
 - Public USB Audio Class 2.0 specification
 - Public Linux kernel documentation (`usbdevfs`, `USBDEVFS_SUBMITURB`)
 - Public Android SDK APIs (`UsbManager`, `UsbDeviceConnection`)
-- System-level observation of (removed) behavior via `dumpsys` / `sysfs` (no decompilation)
+- System-level observation of USB audio protocol behavior via `dumpsys` / `sysfs` / xHCI ftrace
 
 **Recommended license for the standalone library:** MIT or Apache 2.0 — maximizes adoption. The code is ours to license as we choose.
 

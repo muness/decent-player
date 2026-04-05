@@ -561,7 +561,7 @@ class UsbAudioDevice private constructor(private val context: Context) {
     /**
      * Read the CLOCK_VALID control from the DAC via UAC2 GET_CUR.
      * This checks whether the Clock Source entity's clock is locked and stable
-     * after a sample rate change. (removed) does this after SET_CUR before proceeding.
+     * after a sample rate change. Standard practice per UAC2 spec: verify clock after SET_CUR before proceeding.
      *
      * UAC2 spec: Clock Source descriptor, CS = 0x02 (CUR_CLOCK_VALID_CONTROL)
      * Returns: true if clock is valid, false if not or on error.

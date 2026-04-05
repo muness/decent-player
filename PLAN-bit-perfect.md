@@ -454,7 +454,7 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
 - **5 mudanças em 5 arquivos** (Kotlin + C++)
 - Raw bytes path: ByteArray → memcpy → URB
 - Zero float pra FLAC, FFmpeg como fallback pra lossy
-- (removed)-level bit-perfect
+- Full bit-perfect (raw bytes path)
 
 ---
 
