@@ -1,108 +1,65 @@
-# Plano: Bit-Perfect End-to-End — Abordagem libFLAC (estilo (removed))
+# Plano: Bit-Perfect End-to-End — 3 Fases
 
-## Objetivo
+## Visão Geral
 
-Eliminar TODA conversão float do pipeline de áudio FLAC. Os bytes PCM do decoder vão **direto** pro USB DAC sem nenhum cálculo matemático. Mesmo caminho que o (removed) usa.
-
-## Pipeline Atual (com problema)
-```
-FLAC → FFmpeg → float PCM → FloatArray → JNI → float×32767→int16 (C++) → URB → DAC
-                   ↑ conversão 1            ↑ conversão 2 (off-by-one!)
-```
-
-## Pipeline Proposto (bit-perfect absoluto)
-```
-FLAC → media3-decoder-flac (libFLAC) → int16/32 nativo → ByteArray → JNI → memcpy → URB → DAC
-                                         ↑ zero conversão                    ↑ zero math
-```
+| Fase | O quê | Resultado |
+|------|-------|-----------|
+| **1** | FFmpeg (já temos) + corrigir constantes float | Bit-perfect funcional HOJE |
+| **2** | Publicar `com.decentplayer:media3-decoder-flac` | libFLAC como dep Maven |
+| **3** | Raw bytes path no driver USB | Zero float, zero math pra FLAC |
 
 ---
 
-## Pesquisa: Comportamento do media3-decoder-flac
+# FASE 1: Bit-Perfect via FFmpeg (AGORA)
 
-### Maven artifact:
-```groovy
-implementation "androidx.media3:media3-decoder-flac:1.9.3"
+## Contexto
+
+O Jellyfin FFmpeg decoder que já usamos (`org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1`) **já tem decoder FLAC compilado**. A lista de decoders habilitados no build é:
+
+```bash
+ENABLED_DECODERS=(flac alac pcm_mulaw pcm_alaw mp3 aac ac3 eac3 dca mlp truehd)
 ```
 
-### Classes internas:
-- **`LibflacAudioRenderer`** — Renderer customizado (extends `DecoderAudioRenderer`)
-- **`FlacDecoder`** — Usa libFLAC via JNI (`FlacDecoderJni`)
-- Integra automaticamente com ExoPlayer via `DefaultRenderersFactory` com `EXTENSION_RENDERER_MODE_PREFER`
+Ou seja: **FLAC já funciona via FFmpeg**. O problema é que com `enableFloatOutput=true`, o FFmpeg converte tudo pra float, e as constantes de reconversão float→int no C++ estão erradas (off-by-one).
 
-### Formatos de saída (com `enableFloatOutput = false`):
+## Mudanças da Fase 1
 
-| Fonte FLAC | `inputBitsPerSample` | Output Encoding | Bytes/sample |
-|------------|---------------------|-----------------|-------------|
-| 16-bit | 16 | `C.ENCODING_PCM_16BIT` | 2 |
-| 24-bit | 24 | `C.ENCODING_PCM_32BIT` | 4 |
-| 32-bit | 32 | `C.ENCODING_PCM_32BIT` | 4 |
+### 1.1 Corrigir constantes float→int no C++
 
-### Código fonte da decisão (LibflacAudioRenderer):
-```java
-private @C.PcmEncoding int getOutputPcmEncoding(int inputBitsPerSample) {
-    if (shouldOutputFloat) {
-        return C.ENCODING_PCM_FLOAT;
-    }
-    if (inputBitsPerSample == 24 || inputBitsPerSample == 32) {
-        return C.ENCODING_PCM_32BIT;  // 24-bit em container int32, sign-extended
-    }
-    return C.ENCODING_PCM_16BIT;
-}
+**Arquivo:** `libs/decent-usb-audio-driver/src/main/jni/usb-audio-output.cpp` linhas 39-52
+
+```cpp
+// ANTES (ERRADO — off-by-one):
+out[i] = (int16_t)(clampf(src[i]) * 32767.0f);
+int32_t s = (int32_t)(clampf(src[i]) * 8388607.0f);
+out[i] = (int32_t)(clampf(src[i]) * 2147483647.0f);
+
+// DEPOIS (CORRETO — match com FFmpeg libswresample):
+// 16-bit:
+float scaled = clampf(src[i]) * 32768.0f;
+if (scaled > 32767.0f) scaled = 32767.0f;
+if (scaled < -32768.0f) scaled = -32768.0f;
+out[i] = (int16_t)scaled;
+
+// 24-bit:
+float scaled = clampf(src[i]) * 8388608.0f;
+if (scaled > 8388607.0f) scaled = 8388607.0f;
+if (scaled < -8388608.0f) scaled = -8388608.0f;
+int32_t s = (int32_t)scaled;
+
+// 32-bit (usar double — float32 perde precisão pra 2147483648):
+double scaled = (double)clampf(src[i]) * 2147483648.0;
+if (scaled > 2147483647.0) scaled = 2147483647.0;
+if (scaled < -2147483648.0) scaled = -2147483648.0;
+out[i] = (int32_t)scaled;
 ```
 
-### Detalhe crítico sobre 24-bit:
-libFLAC entrega samples 24-bit como **int32 sign-extended** (NÃO left-shifted).
-- Valor 24-bit `1000` → int32 `1000` (0x000003E8)
-- Valor 24-bit `-1` (0xFFFFFF) → int32 `-1` (0xFFFFFFFF)
-- Os 3 bytes inferiores (little-endian) SÃO os bytes originais do sample 24-bit
+**Por quê funciona:** FFmpeg normaliza com `÷2^N`, a reconversão com `×2^N` é exata em float32 pra 16-bit e 24-bit (float32 tem 24 bits de mantissa).
 
-### `shouldOutputFloat` é determinado assim:
-```java
-shouldOutputFloat = supportsFormatInternal(
-    Util.getPcmFormat(C.ENCODING_PCM_FLOAT, channelCount, sampleRate)
-) != SINK_FORMAT_UNSUPPORTED;
-```
-Ou seja: se `enableFloatOutput=false` no DefaultAudioSink → `shouldOutputFloat=false` → saída em inteiro nativo.
+### 1.2 Forçar FFmpeg quando USB bit-perfect ativo
 
-**Para nosso path bit-perfect: `enableFloatOutput` DEVE ser `false`** quando USB bit-perfect está ativo. Isso garante que libFLAC entrega inteiro nativo, não float.
+**Arquivo:** `driver/Felicity/engine/src/main/java/app/simple/felicity/engine/services/FelicityPlayerService.kt` ~linha 314
 
----
-
-## Arquivos que precisam mudar
-
-### Visão geral:
-
-| Arquivo | Mudança |
-|---------|---------|
-| `engine/build.gradle` | Adicionar dep `media3-decoder-flac` |
-| `FelicityPlayerService.kt` | Forçar decoder FLAC + `enableFloatOutput=false` quando USB ativo |
-| `AaudioAudioSink.kt` | Adicionar branch raw bytes no handleBuffer USB |
-| `UsbStreamingThread.kt` | Suportar `ByteArray` além de `FloatArray` na queue |
-| `UsbAudioStream.kt` (na lib) | Adicionar `writeRaw(ByteArray, inputBitDepth)` |
-| `usb-audio-output.cpp` (na lib) | Adicionar `nativeUsbAudioWriteRaw` com memcpy + padding |
-| `usb-audio-output.cpp` (na lib) | TAMBÉM corrigir constantes float (fallback pra non-FLAC) |
-
----
-
-## Mudança 1: Adicionar dependência media3-decoder-flac
-
-### Arquivo: `driver/Felicity/engine/build.gradle`
-
-Adicionar:
-```groovy
-implementation "androidx.media3:media3-decoder-flac:1.9.3"
-```
-
-Isso inclui `libflacJNI.so` no APK. O ExoPlayer auto-detecta e usa quando `EXTENSION_RENDERER_MODE_PREFER` está ativo.
-
----
-
-## Mudança 2: Configurar decoder e float output pra USB bit-perfect
-
-### Arquivo: `driver/Felicity/engine/src/main/java/app/simple/felicity/engine/services/FelicityPlayerService.kt`
-
-### 2a. Forçar FLAC decoder (Extension mode PREFER) — ~linha 314
 ```kotlin
 // ANTES:
 val extensionMode = if (AudioPreferences.getAudioDecoder() == AudioPreferences.FFMPEG) {
@@ -120,55 +77,193 @@ val extensionMode = if (AudioPreferences.isBitPerfectUsbEnabled() ||
 }
 ```
 
-Com `EXTENSION_RENDERER_MODE_PREFER`, o ExoPlayer usa media3-decoder-flac pra FLAC (e FFmpeg pra o resto, se disponível). A prioridade é: extension decoder > MediaCodec.
+### 1.3 Forçar enableFloatOutput quando USB bit-perfect ativo
 
-### 2b. DESABILITAR float output quando USB bit-perfect — ~linha 181 e 224
+**Arquivo:** `driver/Felicity/engine/src/main/java/app/simple/felicity/engine/services/FelicityPlayerService.kt` ~linha 181
+
 ```kotlin
 // ANTES:
 val hiresEnabled = AudioPreferences.isHiresOutputEnabled()
-// ...
-.setEnableFloatOutput(hiresEnabled)
 
 // DEPOIS:
-val usbBitPerfect = AudioPreferences.isBitPerfectUsbEnabled()
-val hiresEnabled = if (usbBitPerfect) false else AudioPreferences.isHiresOutputEnabled()
-// ...
-.setEnableFloatOutput(hiresEnabled)
+val hiresEnabled = AudioPreferences.isHiresOutputEnabled() ||
+                   AudioPreferences.isBitPerfectUsbEnabled()
 ```
 
-**Por quê `false`?** Porque com `enableFloatOutput=true`, o LibflacAudioRenderer converte TUDO pra float — exatamente o que queremos EVITAR. Com `false`, libFLAC entrega int16 ou int32 nativo.
+**Por quê:** Com `enableFloatOutput=true`, o FFmpeg entrega `ENCODING_PCM_FLOAT` pra TUDO (inclusive FLAC 16-bit). Sem isso, FLAC 24-bit é truncado pra 16-bit.
+
+### O que NÃO muda na Fase 1
+
+- `AaudioAudioSink.kt` — handleBuffer já trata float e int corretamente
+- `PcmUtils.kt` — constantes de normalização já estão certas
+- Pipeline USB (claim, alt setting, URBs) — funciona
+- UI/ExoPlayer — delegate muted continua pro clock
+
+### Resultado da Fase 1
+```
+FLAC → FFmpeg → float (÷2^N, exato) → USB driver → int (×2^N, exato) → DAC
+```
+**Bit-perfect comprovável matematicamente.** Round-trip lossless pra 16-bit e 24-bit.
 
 ---
 
-## Mudança 3: Raw bytes path no handleBuffer
+# FASE 2: Publicar com.decentplayer:media3-decoder-flac
 
-### Arquivo: `driver/Felicity/engine/src/main/java/app/simple/felicity/engine/audio/AaudioAudioSink.kt`
+## Objetivo
 
-### Trecho atual (linhas 251-263):
-```kotlin
-if (thread != null && usbWritePendingForCurrentBuffer) {
-    val bps = PcmUtils.bytesPerSample(currentEncoding)
-    val totalSamples = snapshot.remaining() / bps
-    if (totalSamples > 0) {
-        val floatBuf = FloatArray(totalSamples)
-        if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-            snapshot.asFloatBuffer().get(floatBuf)
-        } else {
-            for (i in 0 until totalSamples) {
-                floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
-            }
-        }
-        thread.enqueue(floatBuf)
-    }
-    usbWritePendingForCurrentBuffer = false
+Criar e publicar nosso próprio build do decoder FLAC do media3, compatível com media3 1.9.x. Igual o Jellyfin fez pro FFmpeg.
+
+## Pesquisa: TIDAL como referência
+
+### O que o TIDAL tem hoje
+
+- **Artefato:** `com.tidal.androidx.media3:media3-flac:1.5.0.1`
+- **Conteúdo:** AAR com `libflacJNI.so` pré-compilado (arm64-v8a, armeabi-v7a, x86, x86_64) + 8 classes Java
+- **Tamanho:** ~624KB
+- **Baseado em:** media3 1.5.0
+- **Problema:** Depende de `com.tidal.androidx.media3:media3-exoplayer:1.5.0.1` (fork completo do media3 — incompatível com nosso 1.9.3)
+- **Source:** Repo privado `github.com/tidal-music/tidal-androidx-media` (404)
+
+### Compatibilidade binária TIDAL ↔ media3 1.9.3
+
+**Achado crítico:** O código nativo (JNI) é **IDÊNTICO** entre media3 1.5.0 e 1.9.3:
+
+| Arquivo | Mudanças 1.5.0 → 1.9.3 |
+|---------|------------------------|
+| `flac_jni.cc` | Só whitespace (`Type *name` → `Type* name`) |
+| `flac_parser.cc` | Só whitespace |
+| `FlacDecoderJni.java` | IDÊNTICO (zero mudanças) |
+| `FlacDecoder.java` | IDÊNTICO |
+| `FlacLibrary.java` | IDÊNTICO |
+| `LibflacAudioRenderer.java` | Só removeu `@hide` do javadoc |
+| `CMakeLists.txt` | Removeu 16KB ELF alignment (TIDAL tem, é melhor) |
+
+**Os `.so` do TIDAL produzem código de máquina idêntico ao que seria compilado do 1.9.3.** As 14 symbols JNI exportadas são as mesmas.
+
+### Opção rápida: Extrair .so do TIDAL + Java do 1.9.3
+
+1. Baixar AAR do TIDAL (`media3-flac-1.5.0.1.aar`)
+2. Extrair `jni/{arm64-v8a,armeabi-v7a,x86,x86_64}/libflacJNI.so`
+3. Criar módulo com Java sources do tag `1.9.3` do `androidx/media`
+4. Colocar os `.so` em `src/main/jniLibs/`
+5. Depender de `androidx.media3:media3-decoder:1.9.3` e `media3-exoplayer:1.9.3` (oficiais)
+6. Publicar como `com.decentplayer:media3-decoder-flac:1.9.3+1`
+
+**Funciona porque o JNI ABI é congelado** — os `.so` são binariamente compatíveis.
+
+### Opção robusta: Build completo do source (modelo Jellyfin)
+
+O Jellyfin faz assim pro FFmpeg:
+
+1. **Repo:** `jellyfin/jellyfin-androidx-media`
+2. **Submodules:** `media/` → `androidx/media@release`, `ffmpeg/` → `git.ffmpeg.org/ffmpeg@release/6.0`
+3. **Build nativo:** Chama `build_ffmpeg.sh` do upstream com NDK 26+
+4. **Módulo wrapper:** `media3-ffmpeg-decoder/build.gradle.kts` — reempacota o AAR
+5. **CI:** GitHub Actions com ubuntu-24.04, JDK 17, NDK 26.1, CMake 3.31
+6. **Publish:** Sonatype via `gradle-nexus-publish-plugin`
+7. **Versionamento:** `{media3_version}+{revision}` (ex: `1.9.0+1`)
+
+**Para FLAC, replicar:**
+
+```
+decentplayer-media3-flac/
+├── media/                          ← submodule: androidx/media@1.9.3
+├── libflac/                        ← submodule: xiph/flac (fonte do libFLAC)
+├── media3-decoder-flac/            ← módulo wrapper
+│   └── build.gradle.kts            ← reempacota AAR, deps oficiais
+├── build.sh                        ← link libflac source + trigger build
+├── .github/workflows/publish.yml   ← CI/CD
+├── settings.gradle.kts
+└── build.gradle.kts
+```
+
+**Deps nativas do decoder_flac (do CMakeLists.txt oficial):**
+- libFLAC source de `xiph/flac` (linkado via `add_subdirectory`)
+- NDK 26+ com CMake 3.21+
+- Compila pra 4 ABIs: arm64-v8a, armeabi-v7a, x86, x86_64
+
+### Classes Java do decoder_flac (8 arquivos):
+
+| Classe | Função |
+|--------|--------|
+| `LibflacAudioRenderer` | Renderer que o ExoPlayer auto-detecta via reflection |
+| `FlacDecoder` | Implementação do decoder |
+| `FlacDecoderJni` | Bridge JNI → libflacJNI.so |
+| `FlacDecoderException` | Exceções tipadas |
+| `FlacExtractor` | Extrator de containers FLAC |
+| `FlacBinarySearchSeeker` | Seek support |
+| `FlacLibrary` | Carrega `libflacJNI` via `System.loadLibrary` |
+| `package-info` | Metadados |
+
+### Auto-detecção pelo ExoPlayer
+
+`DefaultRenderersFactory.buildAudioRenderers()` usa reflection:
+```java
+Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
+```
+
+Como nossas classes ficam no **mesmo package** (`androidx.media3.decoder.flac`), o ExoPlayer detecta automaticamente. Zero config necessário no app consumidor — só adicionar a dep.
+
+### Formato de saída do LibflacAudioRenderer
+
+```java
+private @C.PcmEncoding int getOutputPcmEncoding(int inputBitsPerSample) {
+    if (shouldOutputFloat) return C.ENCODING_PCM_FLOAT;
+    if (inputBitsPerSample == 24 || inputBitsPerSample == 32) return C.ENCODING_PCM_32BIT;
+    return C.ENCODING_PCM_16BIT;
 }
 ```
 
-### Substituir por:
+| FLAC source | enableFloatOutput | Output encoding | Bytes/sample |
+|-------------|-------------------|-----------------|-------------|
+| 16-bit | false | `PCM_16BIT` | 2 |
+| 24-bit | false | `PCM_32BIT` (int32, sign-extended) | 4 |
+| 16-bit | true | `PCM_FLOAT` | 4 |
+| 24-bit | true | `PCM_FLOAT` | 4 |
+
+**Com `enableFloatOutput=false`:** saída em inteiro nativo. Ideal pro raw bytes path da Fase 3.
+
+### Recomendação pra Fase 2
+
+**Começar com a opção rápida** (extrair .so do TIDAL + Java 1.9.3) pra validar. Depois migrar pro build completo do source (modelo Jellyfin) pra sustentabilidade.
+
+---
+
+# FASE 3: Raw Bytes Path no USB Driver
+
+## Pré-requisito: Fase 2 concluída (media3-decoder-flac disponível)
+
+## Pipeline final
+```
+FLAC 16-bit → libFLAC → int16 nativo → ByteArray → memcpy → URB → DAC
+FLAC 24-bit → libFLAC → int32 (24-bit sign-ext) → ByteArray → extract 3 bytes → URB → DAC
+```
+
+**Zero float. Zero math (exceto integer shift pra padding de bit-depth).**
+
+## Mudanças da Fase 3
+
+### 3.1 Desabilitar float output quando USB bit-perfect + libFLAC
+
+**Arquivo:** `FelicityPlayerService.kt` ~linha 181
+
+```kotlin
+// Inverter a lógica da Fase 1:
+// Com libFLAC disponível, queremos inteiro nativo, NÃO float
+val hiresEnabled = if (AudioPreferences.isBitPerfectUsbEnabled()) false
+                   else AudioPreferences.isHiresOutputEnabled()
+```
+
+**Por quê:** Com `enableFloatOutput=false`, o `LibflacAudioRenderer` entrega PCM no bit depth nativo (16-bit ou 32-bit container). Com `true`, converte pra float — exatamente o que queremos evitar.
+
+### 3.2 Raw bytes branch no handleBuffer
+
+**Arquivo:** `AaudioAudioSink.kt` linhas 251-263
+
 ```kotlin
 if (thread != null && usbWritePendingForCurrentBuffer) {
     if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-        // Float path (fallback pra formatos non-FLAC via FFmpeg)
+        // FALLBACK: Float path (MP3, AAC via FFmpeg)
         val totalSamples = snapshot.remaining() / 4
         if (totalSamples > 0) {
             val floatBuf = FloatArray(totalSamples)
@@ -176,7 +271,7 @@ if (thread != null && usbWritePendingForCurrentBuffer) {
             thread.enqueue(floatBuf)
         }
     } else {
-        // RAW BYTES PATH (libFLAC → int nativo → direto pro USB)
+        // RAW PATH: libFLAC → int nativo → direto pro USB
         val remaining = snapshot.remaining()
         if (remaining > 0) {
             val rawBytes = ByteArray(remaining)
@@ -188,21 +283,11 @@ if (thread != null && usbWritePendingForCurrentBuffer) {
 }
 ```
 
-**Nota**: O float path fica como fallback pra MP3, AAC, Vorbis (decodados pelo FFmpeg que entrega float). FLAC nunca mais passa pelo float path.
+### 3.3 UsbStreamingThread — suportar ByteArray
 
----
+**Arquivo:** `UsbStreamingThread.kt`
 
-## Mudança 4: UsbStreamingThread suportar ByteArray
-
-### Arquivo: `driver/Felicity/engine/src/main/java/app/simple/felicity/engine/audio/UsbStreamingThread.kt`
-
-### Mudanças:
 ```kotlin
-// ANTES:
-private val audioQueue = ArrayBlockingQueue<FloatArray>(QUEUE_CAPACITY)
-
-// DEPOIS:
-// Sealed class pra tipar os dois tipos de buffer
 private sealed class AudioBuffer {
     class FloatBuffer(val data: FloatArray) : AudioBuffer()
     class RawBuffer(val data: ByteArray, val encoding: Int) : AudioBuffer()
@@ -212,52 +297,34 @@ private val audioQueue = ArrayBlockingQueue<AudioBuffer>(QUEUE_CAPACITY)
 
 fun enqueue(floatBuf: FloatArray) {
     val buf = AudioBuffer.FloatBuffer(floatBuf)
-    if (!audioQueue.offer(buf)) {
-        audioQueue.poll()
-        audioQueue.offer(buf)
-    }
+    if (!audioQueue.offer(buf)) { audioQueue.poll(); audioQueue.offer(buf) }
 }
 
 fun enqueueRaw(rawBytes: ByteArray, encoding: Int) {
     val buf = AudioBuffer.RawBuffer(rawBytes, encoding)
-    if (!audioQueue.offer(buf)) {
-        audioQueue.poll()
-        audioQueue.offer(buf)
-    }
+    if (!audioQueue.offer(buf)) { audioQueue.poll(); audioQueue.offer(buf) }
 }
 
 // No loop da thread:
-val buf = audioQueue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS) ?: continue
-when (buf) {
+when (val buf = audioQueue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
     is AudioBuffer.FloatBuffer -> usbStream.write(buf.data)
     is AudioBuffer.RawBuffer -> usbStream.writeRaw(buf.data, buf.encoding)
+    null -> continue
 }
 ```
 
----
+### 3.4 JNI bridge — writeRaw
 
-## Mudança 5: JNI bridge — adicionar writeRaw
-
-### Arquivo: `libs/decent-usb-audio-driver/src/main/kotlin/com/decent/usbaudio/UsbAudioStream.kt`
-
-Adicionar ao lado do `write(FloatArray)` existente:
+**Arquivo:** `libs/decent-usb-audio-driver/src/main/kotlin/com/decent/usbaudio/UsbAudioStream.kt`
 
 ```kotlin
-/**
- * Writes raw PCM bytes directly to the USB DAC without any conversion.
- * The native layer handles bit-depth matching (padding if needed).
- *
- * @param pcmBuffer  Raw PCM bytes in the source encoding (little-endian)
- * @param inputBitDepth  Bit depth of the input data (16 or 32)
- *                       Note: 24-bit FLAC arrives as 32-bit (int32 sign-extended)
- */
 fun writeRaw(pcmBuffer: ByteArray, encoding: Int) {
     if (nativeHandle == 0L) return
     val inputBitDepth = when (encoding) {
         C.ENCODING_PCM_16BIT -> 16
         C.ENCODING_PCM_24BIT -> 24
         C.ENCODING_PCM_32BIT -> 32
-        else -> return  // float ou desconhecido → não usar raw path
+        else -> return
     }
     nativeUsbAudioWriteRaw(nativeHandle, pcmBuffer, inputBitDepth)
 }
@@ -265,36 +332,29 @@ fun writeRaw(pcmBuffer: ByteArray, encoding: Int) {
 private external fun nativeUsbAudioWriteRaw(handle: Long, pcmBuffer: ByteArray, inputBitDepth: Int)
 ```
 
----
+### 3.5 C++ — nativeUsbAudioWriteRaw
 
-## Mudança 6: C++ — nativeUsbAudioWriteRaw (memcpy + padding)
+**Arquivo:** `libs/decent-usb-audio-driver/src/main/jni/usb-audio-output.cpp`
 
-### Arquivo: `libs/decent-usb-audio-driver/src/main/jni/usb-audio-output.cpp`
-
-### 6a. Adicionar funções de padding inteiro (sem float):
-
+**Funções de padding inteiro (lossless):**
 ```cpp
-// ── Integer bit-depth padding (lossless, zero math) ──────────────
-
-// 16-bit → 24-bit: pad each sample with 1 zero byte (shift left 8 bits)
+// 16-bit → 24-bit (shift left 8)
 static void padInt16ToInt24(const uint8_t *src, uint8_t *dst, int numSamples) {
     for (int i = 0; i < numSamples; i++) {
-        dst[i*3]   = 0;                // LSB = zero padding
-        dst[i*3+1] = src[i*2];         // original byte 0
-        dst[i*3+2] = src[i*2+1];       // original byte 1
+        dst[i*3]   = 0;
+        dst[i*3+1] = src[i*2];
+        dst[i*3+2] = src[i*2+1];
     }
 }
 
-// 16-bit → 32-bit: pad each sample with 2 zero bytes (shift left 16 bits)
+// 16-bit → 32-bit (shift left 16)
 static void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in16 = reinterpret_cast<const int16_t *>(src);
-    for (int i = 0; i < numSamples; i++) {
-        out[i] = (int32_t)in16[i] << 16;
-    }
+    for (int i = 0; i < numSamples; i++) out[i] = (int32_t)in16[i] << 16;
 }
 
-// 32-bit (sign-extended 24-bit from libFLAC) → 24-bit: extract lower 3 bytes
+// int32 (24-bit sign-extended from libFLAC) → 24-bit (extract lower 3 bytes)
 static void extractInt32ToInt24(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *in32 = reinterpret_cast<const int32_t *>(src);
     for (int i = 0; i < numSamples; i++) {
@@ -305,18 +365,15 @@ static void extractInt32ToInt24(const uint8_t *src, uint8_t *dst, int numSamples
     }
 }
 
-// 32-bit (sign-extended 24-bit from libFLAC) → 32-bit: shift left 8 to fill range
+// int32 (24-bit sign-extended) → 32-bit (shift left 8 to fill range)
 static void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in32 = reinterpret_cast<const int32_t *>(src);
-    for (int i = 0; i < numSamples; i++) {
-        out[i] = in32[i] << 8;
-    }
+    for (int i = 0; i < numSamples; i++) out[i] = in32[i] << 8;
 }
 ```
 
-### 6b. Adicionar JNI function `nativeUsbAudioWriteRaw`:
-
+**JNI function:**
 ```cpp
 extern "C" JNIEXPORT void JNICALL
 Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
@@ -327,7 +384,7 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
     jint inputBytes = env->GetArrayLength(pcm);
     if (inputBytes <= 0) return;
 
-    int inputBps = inputBitDepth / 8;  // bytes per sample
+    int inputBps = inputBitDepth / 8;
     int totalSamples = inputBytes / inputBps;
     int outputBytes = totalSamples * ctx->bytesPerSample;
 
@@ -341,119 +398,85 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
     jbyte *rawData = env->GetByteArrayElements(pcm, nullptr);
     if (!rawData) return;
 
-    // ── BIT-DEPTH MATCHING ──
+    // BIT-DEPTH MATCHING
     if (inputBitDepth == ctx->bitDepth) {
-        // EXACT MATCH → memcpy direto (TRUE ZERO-COPY)
-        memcpy(ctx->transferBuffer, rawData, inputBytes);
+        memcpy(ctx->transferBuffer, rawData, inputBytes);  // ZERO-COPY
     } else if (inputBitDepth == 16 && ctx->bitDepth == 24) {
         padInt16ToInt24((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
     } else if (inputBitDepth == 16 && ctx->bitDepth == 32) {
         padInt16ToInt32((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
     } else if (inputBitDepth == 32 && ctx->bitDepth == 24) {
-        // libFLAC 24-bit → DAC 24-bit (extract from int32 container)
         extractInt32ToInt24((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
     } else if (inputBitDepth == 32 && ctx->bitDepth == 32) {
-        // libFLAC 24-bit in int32 → DAC 32-bit (shift to fill range)
         shiftInt32From24((uint8_t *)rawData, ctx->transferBuffer, totalSamples);
     } else {
-        LOGE("Unsupported bit-depth conversion: %d → %d", inputBitDepth, ctx->bitDepth);
+        LOGE("Unsupported bit-depth: %d → %d", inputBitDepth, ctx->bitDepth);
         env->ReleaseByteArrayElements(pcm, rawData, JNI_ABORT);
         return;
     }
 
     env->ReleaseByteArrayElements(pcm, rawData, JNI_ABORT);
 
-    // ── SUBMIT URBs (idêntico ao float path) ──
-    int offset = 0;
-    double fpmf = ctx->sampleRate / 8000.0;
-
-    while (offset < outputBytes && ctx->running.load()) {
-        // [mesma lógica de packet sizing e URB submission do nativeUsbAudioWrite]
-        // ...frameAccumulator, pktSizes, reapOldestUrb, submitRingUrb...
-    }
+    // SUBMIT URBs — mesma lógica do nativeUsbAudioWrite
+    // (extrair pra função compartilhada submitPcmToUrbs)
+    // ...frameAccumulator, pktSizes, reapOldestUrb, submitRingUrb...
 }
 ```
 
-**Nota**: A lógica de packet sizing + URB submission é IDÊNTICA à do `nativeUsbAudioWrite` existente. Deve ser extraída numa função compartilhada `submitPcmToUrbs(ctx, data, totalBytes)` pra evitar duplicação.
+**Nota:** A lógica de URB submission (packet sizing, frame accumulator, backpressure) deve ser extraída numa função compartilhada `submitPcmToUrbs(ctx, data, totalBytes)` usada por ambos `nativeUsbAudioWrite` e `nativeUsbAudioWriteRaw`.
 
-### 6c. TAMBÉM corrigir constantes do float path (fallback)
+### Tabela de bit-depth matching
 
-As funções `convertFloatToInt16/24/32` AINDA precisam da correção das constantes (32767→32768, etc.) porque o float path continua sendo usado pra MP3, AAC, e outros formatos via FFmpeg.
-
----
-
-## Mudança 7: Corrigir constantes float→int (fallback path)
-
-### Arquivo: `libs/decent-usb-audio-driver/src/main/jni/usb-audio-output.cpp` linhas 39-52
-
-Mesmo fix do plano anterior — trocar multiplicadores:
-- `32767.0f` → `32768.0f` (16-bit) + clamp
-- `8388607.0f` → `8388608.0f` (24-bit) + clamp
-- `2147483647.0f` → `2147483648.0` (32-bit, usar double) + clamp
+| FLAC | Encoding | DAC | Operação | Bit-perfect? |
+|------|----------|-----|----------|-------------|
+| 16-bit | `PCM_16BIT` | 16-bit | `memcpy` | ✅ Absoluto |
+| 16-bit | `PCM_16BIT` | 24-bit | `padInt16ToInt24` | ✅ Lossless |
+| 16-bit | `PCM_16BIT` | 32-bit | `padInt16ToInt32` | ✅ Lossless |
+| 24-bit | `PCM_32BIT` | 24-bit | `extractInt32ToInt24` | ✅ Absoluto |
+| 24-bit | `PCM_32BIT` | 32-bit | `shiftInt32From24` | ✅ Lossless |
 
 ---
 
-## O que NÃO muda
+## Resumo das 3 fases
 
-| Componente | Por quê |
-|-----------|---------|
-| ExoPlayer (UI, queue, gapless, seekbar) | delegate muted (linha 269) continua alimentando o clock |
-| Pipeline USB (claim, alt setting, URBs, ring buffer) | Funciona igual — só muda o conteúdo dos bytes |
-| DSP processors | Dentro do DefaultAudioSink, não tocam no áudio USB |
-| Formatos lossy (MP3, AAC, Vorbis, Opus) | Continuam pelo FFmpeg → float path (com constantes corrigidas) |
+### Fase 1 — Agora (branch dev-modular-libs)
+- **3 mudanças em 2 arquivos** + build/test
+- Bit-perfect via FFmpeg com constantes corrigidas
+- Zero risco — não muda arquitetura, só corrige valores
 
----
+### Fase 2 — Próximo (repo/branch separado)
+- Criar `com.decentplayer:media3-decoder-flac:1.9.3+1`
+- Atalho: extrair `.so` do TIDAL + Java do 1.9.3 (compatibilidade binária confirmada)
+- Sustentável: build do source (modelo Jellyfin) com submodules
+- Publicar no Maven Central via Sonatype
 
-## Tabela de bit-depth matching (raw path)
-
-| Fonte FLAC | Encoding recebido | DAC | Operação C++ | Bit-perfect? |
-|------------|-------------------|-----|--------------|-------------|
-| 16-bit | `PCM_16BIT` (2 bytes) | 16-bit | `memcpy` | ✅ Absoluto |
-| 16-bit | `PCM_16BIT` (2 bytes) | 24-bit | `padInt16ToInt24` (shift<<8) | ✅ Lossless |
-| 16-bit | `PCM_16BIT` (2 bytes) | 32-bit | `padInt16ToInt32` (shift<<16) | ✅ Lossless |
-| 24-bit | `PCM_32BIT` (4 bytes) | 24-bit | `extractInt32ToInt24` (3 bytes) | ✅ Absoluto |
-| 24-bit | `PCM_32BIT` (4 bytes) | 32-bit | `shiftInt32From24` (shift<<8) | ✅ Lossless |
-
-Nenhuma operação de ponto flutuante. Apenas shift e memcpy. **Matematicamente impossível perder um bit.**
+### Fase 3 — Depois da Fase 2
+- **5 mudanças em 5 arquivos** (Kotlin + C++)
+- Raw bytes path: ByteArray → memcpy → URB
+- Zero float pra FLAC, FFmpeg como fallback pra lossy
+- (removed)-level bit-perfect
 
 ---
 
-## Ordem de execução
+## Referências
 
-1. **Adicionar `media3-decoder-flac` ao build.gradle** (Mudança 1)
-2. **Configurar decoder + desabilitar float output pra USB** (Mudança 2)
-3. **Corrigir constantes float no C++** (Mudança 7 — independente, pode ser paralelo)
-4. **Adicionar `nativeUsbAudioWriteRaw` no C++** com padding functions (Mudança 6)
-5. **Adicionar `writeRaw()` no `UsbAudioStream.kt`** (Mudança 5)
-6. **Modificar `UsbStreamingThread.kt`** pra suportar ByteArray (Mudança 4)
-7. **Modificar `handleBuffer()` no `AaudioAudioSink.kt`** pra usar raw path (Mudança 3)
-8. **Testar**: FLAC 16-bit, FLAC 24-bit, MP3 (fallback float), transição entre formatos
-9. **Commit na branch `dev-modular-libs`**
+### Repositórios
+- [Official media3 decoder_flac source](https://github.com/androidx/media/tree/release/libraries/decoder_flac)
+- [Jellyfin media3-ffmpeg-decoder build](https://github.com/jellyfin/jellyfin-androidx-media)
+- [TIDAL SDK Android](https://github.com/tidal-music/tidal-sdk-android)
 
----
+### Artefatos Maven
+- TIDAL FLAC: `com.tidal.androidx.media3:media3-flac:1.5.0.1` ([Maven Central](https://central.sonatype.com/artifact/com.tidal.androidx.media3/media3-flac))
+- Jellyfin FFmpeg: `org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1` ([Maven Central](https://central.sonatype.com/artifact/org.jellyfin.media3/media3-ffmpeg-decoder))
 
-## Resultado final
+### Documentação
+- [Media3 supported formats](https://developer.android.com/media/media3/exoplayer/supported-formats)
+- [Media3 migration mappings](https://developer.android.com/media/media3/exoplayer/mappings)
+- [decoder_flac README (build from source)](https://github.com/androidx/media/tree/release/libraries/decoder_flac)
 
-```
-FLAC 16-bit → libFLAC → int16 nativo → ByteArray → memcpy → URB → DAC
-                          ↑ zero conversão           ↑ zero math
-
-FLAC 24-bit → libFLAC → int32 (24-bit sign-ext) → ByteArray → extract 3 bytes → URB → DAC
-                          ↑ zero float                          ↑ shift inteiro (exato)
-
-MP3/AAC     → FFmpeg  → float → FloatArray → float×32768→int (corrigido) → URB → DAC
-                          ↑ fallback path (constantes corrigidas)
-```
-
-## Sobre DSD (futuro)
-
-DSD (.dsf/.dff) não é suportado por nenhum decoder do Media3/ExoPlayer. Requer:
-1. Parser/decoder custom (libdsd2pcm ou implementação própria)
-2. Empacotador DoP (DSD over PCM — bits DSD em frames 24-bit com marcador 0x05/0xFA)
-3. O driver USB atual JÁ suportaria DoP — é só mandar frames 24-bit como se fossem PCM
-
-Ou, pra DACs com suporte nativo:
-1. Parsing de descriptors USB DSD (alt settings específicos)
-2. Raw bitstream transfer (sem empacotamento PCM)
-
-**Não faz parte deste plano.** Pode ser adicionado depois sem quebrar nada.
+### Achados técnicos
+- JNI do FLAC é idêntico entre media3 1.5.0 e 1.9.3 (zero mudanças funcionais no nativo)
+- TIDAL `.so` tem 16KB ELF alignment (melhor pra Android moderno)
+- Jellyfin FFmpeg já inclui decoder FLAC nos `ENABLED_DECODERS`
+- `LibflacAudioRenderer` é auto-detectado por `DefaultRenderersFactory` via reflection: `Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")`
+- Com `enableFloatOutput=false`, libFLAC entrega: 16-bit FLAC → `PCM_16BIT`, 24-bit FLAC → `PCM_32BIT` (int32 sign-extended)
