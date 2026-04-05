@@ -527,13 +527,16 @@ class AaudioAudioSink(
         //   stop() -> drainUrbs() -> release()
         // All URBs are guaranteed to be reaped at this point.
         //
-        // Now the safe xHCI reconfiguration sequence:
-        // 1. setAlt(0) via Java — Configure Endpoint Command FREES old ISO ring
-        // 2. SET_CUR sample rate on Clock Source entity
-        // 3. setAlt(N) via Java — Configure Endpoint Command ALLOCS new ISO ring
-        // 4. Brief pause for new endpoint to stabilize
+        // CRITICAL: Even after drain, the xHCI host controller needs time
+        // to finish internal ring cleanup before a Configure Endpoint Command.
+        // (removed) shows ~195ms gap between drain and setAlt(0). Without this
+        // delay, rapid transitions (e.g., 3+ in a row) cause the xHCI to
+        // get stuck because the Configure Endpoint Command arrives while
+        // the controller is still processing the old ring teardown.
 
-        usbAudioManager.setAltSetting(0)  // Frees old ISO ring
+        Thread.sleep(100)  // Post-drain xHCI stabilization
+
+        usbAudioManager.setAltSetting(0)  // Configure Endpoint: FREE old ISO ring
         Log.i(TAG, "setAlt(0): old ISO ring freed")
 
         usbAudioManager.setSampleRate(sampleRate)
@@ -541,12 +544,12 @@ class AaudioAudioSink(
         val actualRate = usbAudioManager.readSampleRate()
         Log.i(TAG, "DAC reports sample rate: $actualRate Hz (requested: $sampleRate Hz)")
 
-        val altResult = usbAudioManager.setAltSetting(altSetting)  // Allocs new ISO ring
+        Thread.sleep(50)  // Let SET_CUR propagate before new ring allocation
+
+        val altResult = usbAudioManager.setAltSetting(altSetting)  // Configure Endpoint: ALLOC new ISO ring
         Log.i(TAG, "setAlt($altSetting): $altResult — new ISO ring allocated")
 
-        // Brief pause for xHCI endpoint to stabilize after ring allocation
-        // (removed) shows ~47ms between Configure Endpoint and first URB submission
-        Thread.sleep(50)
+        Thread.sleep(50)  // xHCI endpoint stabilization before first URB
 
         if (!stream.start()) {
             Log.e(TAG, "USB stream start failed")
