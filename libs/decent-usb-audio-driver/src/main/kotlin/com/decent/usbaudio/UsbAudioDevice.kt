@@ -517,6 +517,42 @@ class UsbAudioDevice private constructor(private val context: Context) {
     }
 
     /**
+     * Read the CLOCK_VALID control from the DAC via UAC2 GET_CUR.
+     * This checks whether the Clock Source entity's clock is locked and stable
+     * after a sample rate change. (removed) does this after SET_CUR before proceeding.
+     *
+     * UAC2 spec: Clock Source descriptor, CS = 0x02 (CUR_CLOCK_VALID_CONTROL)
+     * Returns: true if clock is valid, false if not or on error.
+     */
+    fun readClockValid(): Boolean {
+        val conn = connection ?: return false
+        val data = ByteArray(1)
+
+        val detectedId = cachedDeviceInfo?.clockSourceId ?: -1
+        val clockSourceIds = if (detectedId > 0) intArrayOf(detectedId)
+                else intArrayOf(0x05, 0x09, 0x0A, 0x0B, 0x0C, 0x28, 0x29)
+        for (csId in clockSourceIds) {
+            val wIndex = (csId shl 8) or 0
+            val ret = conn.controlTransfer(
+                    0xA1,    // bmRequestType: Device-to-Host, Class, Interface
+                    0x01,    // bRequest: GET_CUR
+                    0x0200,  // wValue: CS=0x02 (CLOCK_VALID_CONTROL), CN=0x00
+                    wIndex,
+                    data,
+                    data.size,
+                    1000
+            )
+            if (ret >= 1) {
+                val valid = data[0].toInt() and 0x01
+                Log.i(TAG, "readClockValid: clockSourceId=0x${csId.toString(16)} valid=$valid")
+                return valid == 1
+            }
+        }
+        Log.w(TAG, "readClockValid: all GET_CUR attempts failed")
+        return false
+    }
+
+    /**
      * Set the alternate setting on the streaming interface via Java API.
      * This may properly allocate USB bandwidth, which the native ioctl might not.
      */

@@ -80,6 +80,17 @@ class AaudioAudioSink(
      */
     private var delegateMuted: Boolean = false
 
+    /** Counter for handleBuffer timing logs. */
+    private var handleBufferCallCount: Long = 0
+    private var handleBufferNotConsumedCount: Long = 0
+
+    /**
+     * Tracks whether the current buffer has already been written to USB.
+     * When the delegate returns consumed=false, ExoPlayer retries with
+     * the same buffer. We must not write it to USB again on retry.
+     */
+    private var usbWritePendingForCurrentBuffer: Boolean = true
+
     /**
      * Configures the sink for [inputFormat]. Always delegates to [DefaultAudioSink],
      * then — when [AudioPreferences.isAaudioEnabled] is true — creates or recreates the
@@ -227,13 +238,23 @@ class AaudioAudioSink(
         if (AudioPreferences.isBitPerfectUsbEnabled() && usbStream?.isAlive == true) {
             muteDelegateIfNeeded()
             val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
-            // Feed the delegate (muted) so ExoPlayer's clock and state machine work.
-            // MUST use delegate's return value — ExoPlayer uses it for position
-            // tracking. Returning true unconditionally causes state desync and
-            // triggers excessive reset() calls that kill the USB stream.
+
+            // Write to USB FIRST so the pipeline always gets data even if
+            // the delegate returns consumed=false on this call.
+            if (usbWritePendingForCurrentBuffer) {
+                writeSnapshotToUsb(snapshot, usbStream)
+                usbWritePendingForCurrentBuffer = false
+            }
+
+            // Feed the delegate (muted) for ExoPlayer's position tracking.
+            // TODO: Move USB write to a dedicated streaming thread so the
+            // delegate's timing doesn't starve the USB pipeline. Diagnostic
+            // confirmed: without delegate = zero gaps but ExoPlayer stops
+            // after ~38s (no position tracking). With delegate on same
+            // thread = gaps when delegate returns consumed=false.
             val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
             if (consumed) {
-                writeSnapshotToUsb(snapshot, usbStream)
+                usbWritePendingForCurrentBuffer = true
             }
             return consumed
         }
@@ -385,8 +406,17 @@ class AaudioAudioSink(
     private fun releaseAaudioStream() {
         aaudioStream?.release()
         aaudioStream = null
-        currentSampleRate = 0
-        currentChannelCount = 0
+        // Do NOT reset currentSampleRate/currentChannelCount here.
+        // These fields are used by the USB cache check in configureUsbBitPerfect.
+        // Resetting them causes the USB stream to be needlessly destroyed and
+        // recreated on every configure() call that follows a reset()/flush().
+        // The rate fields are set correctly in configureUsbBitPerfect() when
+        // a new stream is created, so they don't need to be cleared here.
+        if (usbAudioStream == null) {
+            // Only reset rate when USB is not active (pure AAudio mode)
+            currentSampleRate = 0
+            currentChannelCount = 0
+        }
         unmuteDelegateIfNeeded()
         Log.i(TAG, "AAudio stream released")
     }
@@ -557,9 +587,10 @@ class AaudioAudioSink(
         // Step 2: SET_CUR — write new sample rate
         usbAudioManager.setSampleRate(sampleRate)
 
-        // Step 3: GET_CUR — verify rate accepted
-        val actualRate = usbAudioManager.readSampleRate()
-        Log.i(TAG, "Step 2-3: SET_CUR=$sampleRate, GET_CUR=$actualRate Hz")
+        // Step 3: GET_CUR(CLOCK_VALID_CONTROL) — verify clock is locked
+        // (removed) reads selector 0x02 (CLOCK_VALID) not 0x01 (SAM_FREQ)
+        val clockValid = usbAudioManager.readClockValid()
+        Log.i(TAG, "Step 2-3: SET_CUR=$sampleRate, CLOCK_VALID=$clockValid")
 
         // Step 4: setAlt(0) AGAIN — defensive reset after clock change
         // ((removed) does this at line 14769 of the ftrace, after SET_CUR/GET_CUR)

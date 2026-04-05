@@ -19,6 +19,7 @@
 #include <cstring>
 #include <new>
 #include <unistd.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
 
@@ -172,10 +173,14 @@ static int submitRingUrb(UsbAudioContext *ctx, const int *pktSizes, int numPacke
 static int reapOldestUrb(UsbAudioContext *ctx, int timeoutMs) {
     struct usbdevfs_urb *c = nullptr;
 
-    for (int i = 0; i < timeoutMs; i++) {
+    // Poll with 125µs interval matching USB high-speed microframe timing.
+    // At 1ms polling, the max reap latency was 1ms per URB — with 65+ reaps
+    // per write call, this added up to significant jitter causing audible
+    // silence gaps. At 125µs, max latency per reap drops to 0.125ms.
+    int iterations = timeoutMs * 8;  // 8 iterations per ms (125µs each)
+    for (int i = 0; i < iterations; i++) {
         int ret = ioctl(ctx->fd, USBDEVFS_REAPURBNDELAY, &c);
         if (ret == 0 && c != nullptr) {
-            // Success — advance reap index (we trust FIFO order)
             ctx->reapIdx = (ctx->reapIdx + 1) % USB_AUDIO_NUM_URBS;
             ctx->urbsInFlight--;
             return 0;
@@ -184,7 +189,7 @@ static int reapOldestUrb(UsbAudioContext *ctx, int timeoutMs) {
             LOGE("reapOldestUrb: error errno=%d (%s)", errno, strerror(errno));
             return -1;
         }
-        usleep(1000);  // 1ms
+        usleep(125);  // 125µs = 1 USB microframe
     }
     return -2;  // timeout
 }
@@ -368,6 +373,11 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
         ctx->transferBufferCapacity = totalBytes;
     }
 
+    struct timespec writeStart, writeEnd;
+    clock_gettime(CLOCK_MONOTONIC, &writeStart);
+    static long writeCallCount = 0;
+    writeCallCount++;
+
     // Convert float PCM to target bit depth
     jfloat *f = env->GetFloatArrayElements(pcm, nullptr);
     if (!f) return;
@@ -414,7 +424,16 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
 
         // Wait for a free slot if pipeline is full
         if (ctx->urbsInFlight >= USB_AUDIO_NUM_URBS) {
+            struct timespec ts0, ts1;
+            clock_gettime(CLOCK_MONOTONIC, &ts0);
             int result = reapOldestUrb(ctx, 200);
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            long reapUs = (ts1.tv_sec - ts0.tv_sec) * 1000000L +
+                          (ts1.tv_nsec - ts0.tv_nsec) / 1000L;
+            if (reapUs > 5000) {  // log if reap took > 5ms
+                LOGW("Write: reap took %ldus (%.1fms) inflight=%d",
+                     reapUs, reapUs / 1000.0, ctx->urbsInFlight);
+            }
             if (result == -2) {
                 LOGE("Write: reap timeout 200ms, inflight=%d", ctx->urbsInFlight);
                 drainAllUrbs(ctx);
@@ -439,6 +458,15 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
     }
 
     ctx->framesWritten += totalFrames;
+
+    clock_gettime(CLOCK_MONOTONIC, &writeEnd);
+    long writeUs = (writeEnd.tv_sec - writeStart.tv_sec) * 1000000L +
+                   (writeEnd.tv_nsec - writeStart.tv_nsec) / 1000L;
+    // Log every call that took > 10ms, or every 100th call
+    if (writeUs > 10000 || writeCallCount % 100 == 0) {
+        LOGI("nativeWrite #%ld: %d samples, %ldus (%.1fms), inflight=%d",
+             writeCallCount, totalSamples, writeUs, writeUs / 1000.0, ctx->urbsInFlight);
+    }
 
     // Periodic logging (~once per second)
     // NOTE: Do NOT call readFeedback() during streaming! It uses REAPURBNDELAY
