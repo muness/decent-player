@@ -227,7 +227,10 @@ class AaudioAudioSink(
         if (AudioPreferences.isBitPerfectUsbEnabled() && usbStream?.isAlive == true) {
             muteDelegateIfNeeded()
             val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
-            // Feed the delegate (muted) so ExoPlayer's clock and state machine work
+            // Feed the delegate (muted) so ExoPlayer's clock and state machine work.
+            // MUST use delegate's return value — ExoPlayer uses it for position
+            // tracking. Returning true unconditionally causes state desync and
+            // triggers excessive reset() calls that kill the USB stream.
             val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
             if (consumed) {
                 writeSnapshotToUsb(snapshot, usbStream)
@@ -298,11 +301,18 @@ class AaudioAudioSink(
         }
     }
 
-    /** Resets the delegate and releases all native streams. */
+    /**
+     * Resets the delegate. Does NOT release the USB stream — ExoPlayer calls
+     * reset() frequently (track changes, seeks, format changes) and the next
+     * configure() will either reuse the existing USB stream (cache hit) or
+     * properly release and recreate it (cache miss / rate change).
+     * Killing USB here causes audio to briefly route to the speaker between
+     * reset() and the next configure().
+     */
     override fun reset() {
         super.reset()
         releaseAaudioStream()
-        releaseUsbStream()
+        // USB stream survives reset — configure() manages its lifecycle
     }
 
     /** Releases all native streams, then the delegate. */
@@ -452,22 +462,19 @@ class AaudioAudioSink(
      * appropriate alternate setting for the bit depth, and sets the sample rate.
      */
     private fun configureUsbBitPerfect(sampleRate: Int, channelCount: Int, encoding: Int) {
-        // Release AAudio — we're using USB instead
-        if (aaudioStream != null) {
-            releaseAaudioStream()
-        }
-
-        // If USB stream already matches, don't recreate (avoids releasing the interface)
+        // Check USB stream cache FIRST — before releaseAaudioStream() which
+        // resets currentSampleRate to 0 and would break this check.
         if (sampleRate == currentSampleRate && channelCount == currentChannelCount
             && usbAudioStream?.isAlive == true) {
+            // USB stream matches — just release AAudio if present
+            if (aaudioStream != null) releaseAaudioStream()
             Log.d(TAG, "USB stream already configured for rate=$sampleRate ch=$channelCount — keeping it")
             return
         }
 
-        // Only release if we need to reconfigure
-        if (usbAudioStream != null) {
-            releaseUsbStream()
-        }
+        // Need to reconfigure — release both streams
+        if (aaudioStream != null) releaseAaudioStream()
+        if (usbAudioStream != null) releaseUsbStream()
 
         val usbDevice = usbAudioManager.findUsbAudioDevice() ?: return
         var deviceInfo = usbAudioManager.openDevice(usbDevice)

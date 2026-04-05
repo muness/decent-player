@@ -25,7 +25,7 @@
  * Number of URBs in the ring buffer.
  * (removed) uses ~74 URBs. We use 64 for a ~64ms pipeline buffer.
  */
-#define USB_AUDIO_NUM_URBS 16
+#define USB_AUDIO_NUM_URBS 20
 
 /**
  * Max bytes per URB data buffer.

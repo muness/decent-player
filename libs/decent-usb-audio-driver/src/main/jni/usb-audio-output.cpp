@@ -414,9 +414,9 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
 
         // Wait for a free slot if pipeline is full
         if (ctx->urbsInFlight >= USB_AUDIO_NUM_URBS) {
-            int result = reapOldestUrb(ctx, 2000);
+            int result = reapOldestUrb(ctx, 200);
             if (result == -2) {
-                LOGE("Write: reap timeout 2000ms, inflight=%d", ctx->urbsInFlight);
+                LOGE("Write: reap timeout 200ms, inflight=%d", ctx->urbsInFlight);
                 drainAllUrbs(ctx);
                 ctx->running.store(false);
                 return;
