@@ -74,7 +74,11 @@ class GenericPreferencesAdapter(private val preferences: List<Preference>) : Rec
                     holder.binding.icon.setImageResource(preference.icon)
                 }
 
+                holder.itemView.alpha = if (preference.isEnabled) 1.0f else 0.6f
+                holder.binding.popup.isEnabled = preference.isEnabled
+
                 holder.binding.popup.setOnClickListener {
+                    if (!preference.isEnabled) return@setOnClickListener
                     preference.onPreferenceAction?.invoke(it) {
                         holder.binding.popup.text = preference.valueAsStringProvider ?: ""
                     }
@@ -158,8 +162,12 @@ class GenericPreferencesAdapter(private val preferences: List<Preference>) : Rec
                     holder.binding.icon.setImageResource(preference.icon)
                 }
                 holder.binding.switchToggle.setChecked(preference.valueAsBooleanProvider ?: false, false)
+                holder.binding.switchToggle.isEnabled = preference.isEnabled
+                holder.binding.switchToggle.alpha = if (preference.isEnabled) 1.0f else 0.5f
+                holder.itemView.alpha = if (preference.isEnabled) 1.0f else 0.6f
 
                 holder.binding.switchToggle.setOnCheckedChangeListener { switch, isChecked ->
+                    if (!preference.isEnabled) return@setOnCheckedChangeListener
                     preference.onPreferenceAction?.invoke(switch) {
                         /* no-op */
                     }

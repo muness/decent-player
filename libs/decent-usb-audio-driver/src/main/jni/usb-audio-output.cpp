@@ -36,19 +36,42 @@
 
 static inline float clampf(float v) { return v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v); }
 
+// Bit-perfect float→int conversion matching FFmpeg's libswresample normalization.
+// FFmpeg normalizes: int / 2^N (e.g., int16 / 32768.0).
+// Reconversion: float × 2^N gives exact round-trip for 16-bit and 24-bit because:
+//   - 2^N is exactly representable in float32 (power of 2)
+//   - float32 has 24-bit mantissa, covering int16 (16-bit) and int24 (24-bit) exactly
+// Clamp after scaling to handle the asymmetry: -1.0 × 32768 = -32768 (valid min),
+// but +1.0 × 32768 = 32768 (exceeds max 32767, needs clamping).
+
 static void convertFloatToInt16(const float *src, uint8_t *dst, int n) {
     auto *out = reinterpret_cast<int16_t *>(dst);
-    for (int i = 0; i < n; i++) out[i] = (int16_t)(clampf(src[i]) * 32767.0f);
+    for (int i = 0; i < n; i++) {
+        float s = clampf(src[i]) * 32768.0f;
+        if (s > 32767.0f) s = 32767.0f;
+        if (s < -32768.0f) s = -32768.0f;
+        out[i] = (int16_t)s;
+    }
 }
 static void convertFloatToInt24(const float *src, uint8_t *dst, int n) {
     for (int i = 0; i < n; i++) {
-        int32_t s = (int32_t)(clampf(src[i]) * 8388607.0f);
-        dst[i*3] = s & 0xFF; dst[i*3+1] = (s>>8) & 0xFF; dst[i*3+2] = (s>>16) & 0xFF;
+        float s = clampf(src[i]) * 8388608.0f;
+        if (s > 8388607.0f) s = 8388607.0f;
+        if (s < -8388608.0f) s = -8388608.0f;
+        int32_t v = (int32_t)s;
+        dst[i*3] = v & 0xFF; dst[i*3+1] = (v>>8) & 0xFF; dst[i*3+2] = (v>>16) & 0xFF;
     }
 }
 static void convertFloatToInt32(const float *src, uint8_t *dst, int n) {
     auto *out = reinterpret_cast<int32_t *>(dst);
-    for (int i = 0; i < n; i++) out[i] = (int32_t)(clampf(src[i]) * 2147483647.0f);
+    for (int i = 0; i < n; i++) {
+        // Use double: float32 can't represent 2147483648.0 exactly (needs 31 bits,
+        // float32 has 24-bit mantissa). Double has 53-bit mantissa — sufficient.
+        double s = (double)clampf(src[i]) * 2147483648.0;
+        if (s > 2147483647.0) s = 2147483647.0;
+        if (s < -2147483648.0) s = -2147483648.0;
+        out[i] = (int32_t)s;
+    }
 }
 
 // ── Ring buffer management ──────────────────────────────────────────

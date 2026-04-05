@@ -20,6 +20,7 @@ class Preference {
     var valueProvider: Supplier<Any?>? = null
 
     var onPreferenceAction: ((View, (Any?) -> Unit) -> Unit)? = null
+    var isEnabled: Boolean = true
 
     constructor(@StringRes title: Int, @StringRes summary: Int, @DrawableRes icon: Int, type: PreferenceType?) {
         this.title = title

@@ -179,7 +179,10 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // Initialize the RenderersFactory once.
         renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableOffload: Boolean): AudioSink {
-                val hiresEnabled = AudioPreferences.isHiresOutputEnabled()
+                // Force float output when USB bit-perfect is active. FFmpeg normalizes
+                // int→float by dividing by 2^N (exact in float32 for 16/24-bit).
+                // Our C++ reconverts by multiplying by 2^N — exact round-trip.
+                val hiresEnabled = AudioPreferences.isHiresOutputEnabled() || AudioPreferences.isBitPerfectUsbEnabled()
 
                 // Check if the user WANTS to preserve surround sound for their USB DAC
                 // You'd add this boolean to your AudioPreferences
@@ -312,7 +315,11 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
      */
     private fun buildPlayer() {
         // Configure extension mode based on preferences
-        val extensionMode = if (AudioPreferences.getAudioDecoder() == AudioPreferences.FFMPEG) {
+        // Force FFmpeg decoder when USB bit-perfect is active — the Android built-in
+        // decoder truncates 24-bit to 16-bit and lies about float encoding.
+        // FFmpeg genuinely converts all sources to float with exact 2^N normalization.
+        val extensionMode = if (AudioPreferences.isBitPerfectUsbEnabled() ||
+                                AudioPreferences.getAudioDecoder() == AudioPreferences.FFMPEG) {
             DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
         } else {
             DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF

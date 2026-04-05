@@ -27,8 +27,10 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
     companion object {
         private const val TAG = "UsbStreamingThread"
 
-        /** Queue capacity in buffers. At ~85ms per buffer, 64 buffers ≈ 5.4 seconds. */
-        private const val QUEUE_CAPACITY = 64
+        /** Queue capacity in buffers. At ~85ms per buffer, 128 buffers ≈ 10.8 seconds.
+         *  Large enough to absorb the initial burst when ExoPlayer fills the queue
+         *  faster than the USB thread can consume (during pipeline fill). */
+        private const val QUEUE_CAPACITY = 128
 
         /** Poll timeout — thread checks running flag at this interval when idle. */
         private const val POLL_TIMEOUT_MS = 100L
@@ -64,11 +66,16 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
      * Enqueue a PCM buffer for USB playback. Non-blocking.
      * If the queue is full, drops the oldest buffer to make room.
      */
+    private var dropCount = 0
+
     fun enqueue(floatBuf: FloatArray) {
         if (!audioQueue.offer(floatBuf)) {
             audioQueue.poll()           // drop oldest
             audioQueue.offer(floatBuf)  // guaranteed space
-            Log.w(TAG, "Queue full, dropped oldest buffer (queue=${audioQueue.size})")
+            dropCount++
+            if (dropCount <= 3 || dropCount % 100 == 0) {
+                Log.w(TAG, "Queue full, dropped buffer #$dropCount")
+            }
         }
     }
 

@@ -518,6 +518,8 @@ abstract class PreferenceFragment : MediaFragment() {
     protected fun createEnginePanel(): List<Preference> {
         val preferences = mutableListOf<Preference>()
 
+        val bitPerfectActive = AudioPreferences.isBitPerfectUsbEnabled()
+
         val decoderHeader = Preference(type = PreferenceType.SUB_HEADER, title = R.string.decoder)
 
         val currentDecoder = Preference(
@@ -526,7 +528,9 @@ abstract class PreferenceFragment : MediaFragment() {
                 icon = R.drawable.ic_memory,
                 type = PreferenceType.POPUP,
                 valueProvider = {
-                    when (AudioPreferences.getAudioDecoder()) {
+                    if (bitPerfectActive) {
+                        getString(R.string.ffmpeg) + " (bit-perfect)"
+                    } else when (AudioPreferences.getAudioDecoder()) {
                         AudioPreferences.LOCAL_DECODER -> getString(R.string.system_hardware)
                         AudioPreferences.FFMPEG -> getString(R.string.ffmpeg)
                         else -> getString(R.string.system_hardware)
@@ -554,7 +558,7 @@ abstract class PreferenceFragment : MediaFragment() {
                             }
                     ).show()
                 }
-        )
+        ).apply { isEnabled = !bitPerfectActive }
 
         val fallbackToSWToggle = Preference(
                 title = R.string.fallback_to_software_decoder,
@@ -580,9 +584,9 @@ abstract class PreferenceFragment : MediaFragment() {
                     AudioPreferences.setHiresOutput((view as FelicitySwitch).isChecked)
                 },
                 valueProvider = Supplier {
-                    AudioPreferences.isHiresOutputEnabled()
+                    AudioPreferences.isHiresOutputEnabled() || bitPerfectActive
                 }
-        )
+        ).apply { isEnabled = !bitPerfectActive }
 
         val hiresWarning = Preference(
                 title = R.string.hires_warning,
