@@ -58,6 +58,9 @@ class AaudioAudioSink(
     /** Manages USB device discovery, permissions, and connection lifecycle. */
     private val usbAudioManager = UsbAudioDevice.getInstance(context)
 
+    /** Dedicated thread for USB audio streaming, decoupled from render thread. */
+    private var usbStreamingThread: UsbStreamingThread? = null
+
     /** PCM encoding of the most recently configured format. */
     private var currentEncoding: Int = C.ENCODING_PCM_16BIT
 
@@ -239,19 +242,30 @@ class AaudioAudioSink(
             muteDelegateIfNeeded()
             val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
 
-            // Write to USB FIRST so the pipeline always gets data even if
-            // the delegate returns consumed=false on this call.
-            if (usbWritePendingForCurrentBuffer) {
-                writeSnapshotToUsb(snapshot, usbStream)
+            // Enqueue PCM to the USB streaming thread (~0ms, non-blocking).
+            // The USB thread writes at the DAC's clock rate via reap backpressure,
+            // completely decoupled from the delegate's timing.
+            // Guard against duplicates: when consumed=false, ExoPlayer retries
+            // with the same buffer. Only enqueue on the first call.
+            val thread = usbStreamingThread
+            if (thread != null && usbWritePendingForCurrentBuffer) {
+                val bps = PcmUtils.bytesPerSample(currentEncoding)
+                val totalSamples = snapshot.remaining() / bps
+                if (totalSamples > 0) {
+                    val floatBuf = FloatArray(totalSamples)
+                    if (currentEncoding == C.ENCODING_PCM_FLOAT) {
+                        snapshot.asFloatBuffer().get(floatBuf)
+                    } else {
+                        for (i in 0 until totalSamples) {
+                            floatBuf[i] = PcmUtils.readFloat(snapshot, currentEncoding)
+                        }
+                    }
+                    thread.enqueue(floatBuf)
+                }
                 usbWritePendingForCurrentBuffer = false
             }
 
             // Feed the delegate (muted) for ExoPlayer's position tracking.
-            // TODO: Move USB write to a dedicated streaming thread so the
-            // delegate's timing doesn't starve the USB pipeline. Diagnostic
-            // confirmed: without delegate = zero gaps but ExoPlayer stops
-            // after ~38s (no position tracking). With delegate on same
-            // thread = gaps when delegate returns consumed=false.
             val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
             if (consumed) {
                 usbWritePendingForCurrentBuffer = true
@@ -316,6 +330,7 @@ class AaudioAudioSink(
      */
     override fun flush() {
         super.flush()
+        usbStreamingThread?.flush()
         aaudioStream?.apply {
             stop()
             start()
@@ -610,6 +625,7 @@ class AaudioAudioSink(
             return
         }
 
+        usbStreamingThread = UsbStreamingThread(stream).also { it.start() }
         usbAudioStream = stream
         currentSampleRate = sampleRate
         currentChannelCount = channelCount
@@ -656,6 +672,10 @@ class AaudioAudioSink(
     private fun releaseUsbStream() {
         val stream = usbAudioStream ?: return
         usbAudioStream = null
+
+        // 0. Stop the streaming thread FIRST (drains queue, joins thread)
+        usbStreamingThread?.stop()
+        usbStreamingThread = null
 
         // 1. Stop accepting new writes
         stream.stop()
