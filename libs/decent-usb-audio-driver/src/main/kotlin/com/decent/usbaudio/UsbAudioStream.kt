@@ -64,6 +64,10 @@ class UsbAudioStream(
     val isAlive: Boolean
         get() = nativeHandle != 0L && nativeIsRunning(nativeHandle)
 
+    /** Total frames written to USB since last start(). Used for position tracking. */
+    val framesWritten: Long
+        get() = if (nativeHandle != 0L) nativeGetFramesWritten(nativeHandle) else 0L
+
     /**
      * Select alternate setting on the USB streaming interface.
      * This determines the active format (bit depth) of the endpoint.
@@ -144,6 +148,15 @@ class UsbAudioStream(
     }
 
     /**
+     * Reset the frame accumulator and residual buffer. Called on seek/flush
+     * to prevent packet size jitter and boundary pops after a discontinuity.
+     */
+    fun flush() {
+        if (nativeHandle == 0L) return
+        nativeFlush(nativeHandle)
+    }
+
+    /**
      * Drain all in-flight URBs. Blocks until every URB is reaped.
      *
      * This MUST be called after [stop] and BEFORE the Kotlin layer calls
@@ -181,9 +194,11 @@ class UsbAudioStream(
     private external fun nativeUsbAudioWrite(handle: Long, pcmBuffer: FloatArray)
     private external fun nativeUsbAudioWriteRaw(handle: Long, pcmBuffer: ByteArray, inputBitDepth: Int)
     private external fun nativeUsbAudioStop(handle: Long)
+    private external fun nativeFlush(handle: Long)
     private external fun nativeDrainUrbs(handle: Long): Int
     private external fun nativeUsbAudioDestroy(handle: Long)
     private external fun nativeIsRunning(handle: Long): Boolean
+    private external fun nativeGetFramesWritten(handle: Long): Long
 
     companion object {
         private const val TAG = "UsbAudioStream"

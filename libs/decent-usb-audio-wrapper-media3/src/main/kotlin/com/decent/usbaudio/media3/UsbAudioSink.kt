@@ -25,17 +25,6 @@ import java.nio.ByteOrder
  * streaming thread with a producer-consumer queue, decoupling USB timing from
  * the delegate's AudioTrack timing.
  *
- * Usage:
- * ```kotlin
- * val baseSink = DefaultAudioSink.Builder(context)
- *     .setEnableFloatOutput(true)
- *     .build()
- * val usbSink = UsbAudioSink(baseSink, context)
- *
- * // On track change, set the source bit depth for optimal alt setting:
- * usbSink.trackBitDepth = 24  // from file metadata
- * ```
- *
  * @param delegate  The [DefaultAudioSink] owned by the ExoPlayer renderer.
  * @param context   Application context for USB device detection and audio routing.
  * @param config    Configuration options (default: bit-perfect enabled, route to speaker).
@@ -61,6 +50,7 @@ class UsbAudioSink(
     private var delegateMuted: Boolean = false
     private var usbWritePendingForCurrentBuffer: Boolean = true
     private var handleBufferCallCount: Long = 0
+
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
         val enc = inputFormat.pcmEncoding
@@ -111,7 +101,6 @@ class UsbAudioSink(
                 handleBufferCallCount++
 
                 if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-                    // Float path: FFmpeg (MP3, AAC, FLAC via float)
                     val totalSamples = snapshot.remaining() / 4
                     if (totalSamples > 0) {
                         val floatBuf = FloatArray(totalSamples)
@@ -122,8 +111,6 @@ class UsbAudioSink(
                         thread.enqueue(floatBuf)
                     }
                 } else {
-                    // Raw bytes path: libFLAC → int nativo → direto pro USB
-                    // Zero float in the entire pipeline.
                     val remaining = snapshot.remaining()
                     if (remaining > 0) {
                         val rawBytes = ByteArray(remaining)
@@ -159,6 +146,7 @@ class UsbAudioSink(
     override fun flush() {
         super.flush()
         usbStreamingThread?.flush()
+        usbAudioStream?.flush()
     }
 
     override fun reset() {

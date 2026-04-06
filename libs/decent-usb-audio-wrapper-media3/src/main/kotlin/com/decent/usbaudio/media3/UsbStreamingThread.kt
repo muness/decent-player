@@ -81,6 +81,8 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
         }
     }
 
+    fun hasPendingData(): Boolean = !audioQueue.isEmpty()
+
     fun flush() {
         audioQueue.clear()
     }

@@ -23,9 +23,10 @@
 
 /**
  * Number of URBs in the ring buffer.
- * Optimal pipeline depth is ~74 URBs based on USB protocol analysis. We use 64 for a ~64ms pipeline buffer.
+ * industry implementations use 76-78 URBs at 44.1kHz. Matching their count to minimize
+ * differences in xHCI ring scheduling behavior.
  */
-#define USB_AUDIO_NUM_URBS 20
+#define USB_AUDIO_NUM_URBS 80
 
 /**
  * Max bytes per URB data buffer.
@@ -97,4 +98,35 @@ struct UsbAudioContext {
 
     /** Fractional accumulator for sample-rate-to-packet-size conversion. */
     double frameAccumulator;
+
+    /**
+     * Frames per microframe, calibrated from the DAC's async feedback endpoint.
+     * More accurate than the nominal sampleRate/8000.0 calculation because it
+     * reflects the DAC's actual hardware clock frequency.
+     * E.g., nominal 44100Hz = 5.5125 fpmf, but DAC may report 5.5127 (44101.6Hz).
+     * Without calibration, the drift causes periodic pops as the DAC's internal
+     * buffer underflows or overflows.
+     */
+    double calibratedFpmf;
+
+    /**
+     * Residual buffer for bytes that didn't align to a complete frame
+     * at the end of a write() call. Prepended to the next call's data
+     * to avoid micro-discontinuities (pops) at buffer boundaries.
+     * Max size = bytesPerFrame - 1 (e.g., 7 bytes for 32-bit stereo).
+     */
+    uint8_t residualBuffer[USB_AUDIO_URB_BUFFER_SIZE];
+    int residualBytes;
+
+    // ── Continuous feedback ─────────────────────────────────────
+    /**
+     * Dedicated URB for the async feedback endpoint. Submitted at start
+     * and continuously recycled during streaming. When the reap loop
+     * gets this URB instead of an audio URB, it updates calibratedFpmf
+     * and resubmits — tracking the DAC's actual clock in real-time.
+     * Matches industry-standard "send USB" thread behavior (~1ms interval).
+     */
+    struct usbdevfs_urb *feedbackUrb;
+    uint8_t feedbackBuffer[4];
+    bool feedbackInFlight;
 };
