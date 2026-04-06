@@ -178,7 +178,7 @@ Total overhead per 1ms of audio: ~0.11ms. Even on the iBasso DX340, this leaves 
 
 ### Implementation Priority
 
-1. **Phase 1**: NativeAudioEngine with FLAC support only (covers 90% of hi-res content)
-2. **Phase 2**: WAV/AIFF support (trivial after Phase 1)
-3. **Phase 3**: ExoPlayer integration (AudioSink that delegates to native engine)
-4. **Phase 4**: Seek, gapless playback, track transitions
+1. **Phase 1**: NativeAudioEngine with FLAC support — decode loop, USB output, position reporting
+2. **Phase 2**: ExoPlayer integration — AudioSink that delegates to native engine
+3. **Phase 3**: Seek, gapless playback, track transitions
+4. **Phase 4**: Stress testing on iBasso DX340 at 96/192/384kHz until rock solid
