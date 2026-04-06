@@ -868,13 +868,13 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         usbSink.trackBitDepth = audio.bitPerSample.toInt()
                         usbSink.currentTrackPath = audio.path
                         AudioPreferences.setCurrentTrackBitDepth(audio.bitPerSample.toInt())
+                        // Create engine NOW with correct path (not lazy in handleBuffer
+                        // which fires before path is updated)
+                        usbSink.createEngineIfNeeded()
                         Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}, path=${audio.path}")
                     }
-                    // Only force restart if the engine actually finished (auto-transition).
-                    // Don't seekTo(0) if the engine is still playing (ExoPlayer pre-buffer).
                     if (engineFinished) {
                         player.seekTo(0)
-                        Log.i(TAG, "Engine finished — forced seekTo(0) for next track")
                     }
                 }
 

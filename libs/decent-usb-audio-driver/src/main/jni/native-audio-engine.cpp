@@ -25,29 +25,68 @@
 #include <cstring>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #define TAG "NativeAudioEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-// ── FileDataSource: reads from a file descriptor ────────────────────
+// ── MmapDataSource: memory-mapped file for zero-syscall reads ───────
 
-class FileDataSource : public DataSource {
-    int fd_;
-    bool ownsFd_;
+/** Reads entire file into RAM. Zero I/O during decode — eliminates all
+ *  SD card latency stalls. (removed) likely does the same thing. */
+class RamDataSource : public DataSource {
+    uint8_t *buffer_;
+    size_t length_;
 public:
-    FileDataSource(int fd, bool ownsFd) : fd_(fd), ownsFd_(ownsFd) {}
-    ~FileDataSource() override { if (ownsFd_ && fd_ >= 0) close(fd_); }
+    RamDataSource(int fd, bool ownsFd) : buffer_(nullptr), length_(0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size > 0) {
+            length_ = (size_t)st.st_size;
+            buffer_ = (uint8_t *)malloc(length_);
+            if (buffer_) {
+                // Read entire file into RAM using sequential read() with large chunks.
+                // pread64 in small chunks was 1.4MB/s on SD card due to syscall overhead.
+                lseek64(fd, 0, SEEK_SET);
+                posix_fadvise(fd, 0, length_, POSIX_FADV_SEQUENTIAL);
+                posix_fadvise(fd, 0, length_, POSIX_FADV_WILLNEED);
+                size_t total = 0;
+                const size_t CHUNK = 4 * 1024 * 1024;  // 4MB chunks — minimizes FUSE roundtrips
+                while (total < length_) {
+                    size_t toRead = length_ - total;
+                    if (toRead > CHUNK) toRead = CHUNK;
+                    ssize_t n = read(fd, buffer_ + total, toRead);
+                    if (n <= 0) break;
+                    total += n;
+                }
+                if (total < length_) {
+                    LOGE("RamDataSource: read only %zu of %zu bytes", total, length_);
+                    length_ = total;
+                }
+                LOGI("RamDataSource: loaded %zu bytes into RAM", length_);
+            } else {
+                LOGE("RamDataSource: malloc(%zu) failed", length_);
+                length_ = 0;
+            }
+        }
+        if (ownsFd && fd >= 0) close(fd);
+    }
+
+    ~RamDataSource() override {
+        free(buffer_);
+    }
 
     ssize_t readAt(off64_t offset, void *const data, size_t size) override {
-        return pread64(fd_, data, size, offset);
+        if (!buffer_ || offset >= (off64_t)length_) return 0;
+        size_t available = length_ - (size_t)offset;
+        if (size > available) size = available;
+        memcpy(data, buffer_ + offset, size);
+        return (ssize_t)size;
     }
 
     off64_t getLength() override {
-        struct stat st;
-        if (fstat(fd_, &st) == 0) return st.st_size;
-        return -1;
+        return buffer_ ? (off64_t)length_ : -1;
     }
 };
 
@@ -55,7 +94,7 @@ public:
 
 struct NativeAudioEngine {
     // Input
-    FileDataSource *dataSource;
+    RamDataSource *dataSource;
     FLACParser *parser;
 
     // USB output (owned by UsbAudioStream on the Java side)
@@ -220,7 +259,7 @@ Java_com_decent_usbaudio_NativeAudioEngine_nativeCreateFromFd(
         return 0;
     }
 
-    auto *ds = new FileDataSource(ownedFd, true);
+    auto *ds = new RamDataSource(ownedFd, true);
     auto *parser = new FLACParser(ds);
 
     if (!parser->init()) {

@@ -57,15 +57,53 @@ class UsbAudioSink(
             windowOffsetUs = -1L
             usbStartMediaTimeNeedsInit = true
             Log.i(TAG, "cleanupFinishedEngine: old engine cleared")
+
+            // Apply deferred USB reconfiguration (cross-rate transition)
+            if (hasDeferredConfig) {
+                Log.i(TAG, "cleanupFinishedEngine: applying deferred config rate=$deferredRate")
+                configureUsbBitPerfect(deferredRate, deferredChannels, deferredEncoding)
+                hasDeferredConfig = false
+            }
             return true
         }
         return false
+    }
+
+    /** Call from FelicityPlayerService AFTER setting currentTrackPath.
+     *  Creates a native engine if the USB stream is ready and no engine exists.
+     *  Replaces the streaming thread fallback if one was set up due to rate mismatch. */
+    fun createEngineIfNeeded() {
+        if (nativeEngine?.isRunning == true) return  // already running
+        val stream = usbAudioStream
+        if (stream != null && stream.isAlive) {
+            // Clean up dead engine if exists
+            val old = nativeEngine
+            if (old != null && !old.isRunning) {
+                old.destroy()
+                nativeEngine = null
+                activeEnginePath = null
+            }
+            if (nativeEngine == null) {
+                windowOffsetUs = -1L
+                usbStartMediaTimeNeedsInit = true
+                startNativeEngineIfFlac(stream)
+                // Resume immediately at position 0 — don't wait for handleBuffer
+                val engine = nativeEngine
+                if (engine != null) {
+                    engine.seek(0)
+                    engine.resume()
+                    engineNeedsInitialSeek = false
+                }
+                Log.i(TAG, "createEngineIfNeeded: engine=${nativeEngine != null}")
+            }
+        }
     }
 
     private var usbAudioStream: UsbAudioStream? = null
     private val usbAudioDevice = UsbAudioDevice.getInstance(context)
     private var usbStreamingThread: UsbStreamingThread? = null
     private var nativeEngine: NativeAudioEngine? = null
+    private val engineLock = Any()
 
     private var currentEncoding: Int = C.ENCODING_PCM_16BIT
     private var currentSampleRate: Int = 0
@@ -101,19 +139,39 @@ class UsbAudioSink(
     /** Tracks ExoPlayer's play/pause state so seek-while-paused doesn't auto-resume. */
     private var isPlaying = false
 
+    /** Deferred USB reconfiguration — applied after engine finishes playing. */
+    private var deferredRate: Int = 0
+    private var deferredChannels: Int = 0
+    private var deferredEncoding: Int = 0
+    private var hasDeferredConfig: Boolean = false
+
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
         val enc = inputFormat.pcmEncoding
         if (enc != Format.NO_VALUE) currentEncoding = enc
 
-        // If native engine is still playing the SAME track, don't touch it.
-        // This happens when ExoPlayer pre-buffers the next track ~10s before EOF.
-        // But if the track CHANGED (manual skip), destroy the engine and proceed.
-        if (nativeEngine?.isRunning == true && currentTrackPath == activeEnginePath) {
-            super.configure(inputFormat, specifiedBufferSize, outputChannels)
-            muteDelegateIfNeeded()
-            Log.i(TAG, "configure: engine still playing same track — delegate only")
-            return
+        // If native engine is still playing the SAME track AND the rate didn't change,
+        // don't touch it. This happens when ExoPlayer pre-buffers the next track ~10s
+        // before EOF. But if the track or rate changed, destroy and reconfigure.
+        if (nativeEngine?.isRunning == true) {
+            val trackChanged = currentTrackPath != activeEnginePath
+            if (!trackChanged) {
+                // Same track, ExoPlayer pre-buffering — defer reconfiguration
+                if (inputFormat.sampleRate != currentSampleRate || inputFormat.channelCount != currentChannelCount) {
+                    deferredRate = inputFormat.sampleRate
+                    deferredChannels = inputFormat.channelCount
+                    deferredEncoding = enc
+                    hasDeferredConfig = true
+                    Log.i(TAG, "configure: engine running, pre-buffer — deferred rate=${inputFormat.sampleRate}")
+                } else {
+                    Log.i(TAG, "configure: engine running, same rate — keeping alive")
+                }
+                super.configure(inputFormat, specifiedBufferSize, outputChannels)
+                muteDelegateIfNeeded()
+                return
+            }
+            // Track changed (manual skip) — destroy engine and proceed
+            Log.i(TAG, "configure: track changed, destroying engine")
         }
         // Track changed or engine finished — destroy old engine
         val oldEngine = nativeEngine
@@ -167,13 +225,16 @@ class UsbAudioSink(
         if (config.bitPerfectEnabled && stream?.isAlive == true) {
             muteDelegateIfNeeded()
 
-            // Lazy engine creation: create native FLAC engine on first handleBuffer
-            // after configure(). By this time, onMediaItemTransition has set the correct
-            // currentTrackPath (configure() fires BEFORE the path is updated).
+            // Fallback engine creation: if no engine and no streaming thread,
+            // try creating one now (path and USB rate should both be correct by this point)
             if (nativeEngine == null && usbStreamingThread == null) {
-                val stream = usbAudioStream
-                if (stream != null && stream.isAlive) {
-                    startNativeEngineIfFlac(stream)
+                startNativeEngineIfFlac(stream)
+                // If engine was just created paused, seek to 0 and resume
+                val newEngine = nativeEngine
+                if (newEngine != null && engineNeedsInitialSeek) {
+                    newEngine.seek(0)
+                    if (isPlaying) newEngine.resume()
+                    engineNeedsInitialSeek = false
                 }
             }
 
@@ -325,8 +386,9 @@ class UsbAudioSink(
     override fun play() {
         super.play()
         isPlaying = true
-        if (!engineNeedsInitialSeek) nativeEngine?.resume()
+        val resumed = if (!engineNeedsInitialSeek) { nativeEngine?.resume(); true } else false
         usbStreamingThread?.resumeStreaming()
+        Log.i(TAG, "play() needsSeek=$engineNeedsInitialSeek resumed=$resumed")
     }
 
     override fun pause() {
@@ -482,14 +544,20 @@ class UsbAudioSink(
         currentChannelCount = channelCount
         muteDelegateIfNeeded()
 
-        // Native engine will be created lazily in handleBuffer when currentTrackPath is set.
-        // This ensures onMediaItemTransition (which sets the path) has fired first.
+        // Try to create engine now (works for first track where onMediaItemTransition
+        // fired before configure). For subsequent tracks, createEngineIfNeeded() in
+        // onMediaItemTransition handles it (path is correct by then).
+        startNativeEngineIfFlac(stream)
+
         Log.i(TAG, "USB bit-perfect stream ACTIVE: rate=$sampleRate ch=$channelCount " +
                 "bits=$bitDepth device=${deviceInfo.deviceName}")
     }
 
     /** Try to start a native FLAC engine. Falls back to ExoPlayer streaming thread. */
+    @Synchronized
     private fun startNativeEngineIfFlac(stream: UsbAudioStream) {
+        if (nativeEngine != null) return  // already created (synchronized method)
+
         // Stop existing streaming thread (mutually exclusive with native engine)
         usbStreamingThread?.stop()
         usbStreamingThread = null
@@ -504,15 +572,24 @@ class UsbAudioSink(
                 val created = engine.createFromFd(fd.fd, stream.nativeHandle)
                 fd.close()
                 if (created && engine.start()) {
-                    // Start paused — will resume in handleBuffer after capturing
-                    // the correct seek position from ExoPlayer's presentationTimeUs.
-                    // Without this, the engine briefly outputs audio from position 0.
-                    engine.pause()
-                    nativeEngine = engine
-                    engineNeedsInitialSeek = true
-                    activeEnginePath = path
-                    Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name}")
-                    return
+                    // Verify FLAC sample rate matches USB stream — prevents distortion
+                    // when ExoPlayer's queue and onMediaItemTransition disagree about
+                    // which track is playing (e.g., cross-album Recently Played lists).
+                    if (engine.getSampleRate() != currentSampleRate) {
+                        Log.w(TAG, "Rate mismatch: FLAC=${engine.getSampleRate()} USB=$currentSampleRate" +
+                                " — falling back to ExoPlayer pipeline")
+                        engine.stop()
+                        engine.destroy()
+                    } else {
+                        // Start paused — will resume in handleBuffer after capturing
+                        // the correct seek position from ExoPlayer's presentationTimeUs.
+                        engine.pause()
+                        nativeEngine = engine
+                        engineNeedsInitialSeek = true
+                        activeEnginePath = path
+                        Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name}")
+                        return
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Native engine failed: ${e.message}")
