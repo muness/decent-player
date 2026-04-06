@@ -27,6 +27,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import com.decent.usbaudio.media3.NativeEngineAwareLoadControl
+import app.simple.felicity.repository.loader.AudioDatabaseLoader
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -374,6 +376,12 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
 
         Log.i(TAG, "LoadControl configured for ${if (hiresEnabled) "Hi-Res" else "Standard"} mode")
 
+        // Wrap with NativeEngineAwareLoadControl to stop ExoPlayer from reading
+        // the SD card when the native FLAC engine is handling decode+USB directly.
+        val wrappedLoadControl = NativeEngineAwareLoadControl(loadControl) {
+            currentUsbSink?.isNativeEngineActive == true
+        }
+
         // Build new player instance
         player = ExoPlayer.Builder(this, renderersFactory!!)
             .setAudioAttributes(
@@ -384,7 +392,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         .build(),
                     true
             )
-            .setLoadControl(loadControl)
+            .setLoadControl(wrappedLoadControl)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
@@ -616,6 +624,10 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 .build()
         }
 
+        val wrappedLoadControl = NativeEngineAwareLoadControl(loadControl) {
+            currentUsbSink?.isNativeEngineActive == true
+        }
+
         player = ExoPlayer.Builder(this, renderersFactory!!)
             .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -625,7 +637,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         .build(),
                     true
             )
-            .setLoadControl(loadControl)
+            .setLoadControl(wrappedLoadControl)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
@@ -694,6 +706,9 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            // Pause/resume metadata scanner based on native engine state
+            AudioDatabaseLoader.playbackActive = currentUsbSink?.isNativeEngineActive == true && isPlaying
+
             val format = player.audioFormat
             if (format != null && format.pcmEncoding != C.ENCODING_INVALID) {
                 val encodingName = when (format.pcmEncoding) {
@@ -871,6 +886,9 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         // Create engine NOW with correct path (not lazy in handleBuffer
                         // which fires before path is updated)
                         usbSink.createEngineIfNeeded()
+                        // Pause metadata scanner while native engine plays — prevents
+                        // SD card FUSE I/O contention that causes playback stalls.
+                        AudioDatabaseLoader.playbackActive = usbSink.isNativeEngineActive
                         Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}, path=${audio.path}")
                     }
                     if (engineFinished) {

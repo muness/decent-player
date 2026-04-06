@@ -2,7 +2,11 @@
 
 Native FLAC decoder for AndroidX Media3 / ExoPlayer, built from source (xiph/flac + media3 JNI).
 
-ExoPlayer auto-detects this decoder via reflection. When present, FLAC files are decoded natively instead of using FFmpeg, delivering raw integer PCM (no float conversion) for true bit-perfect output.
+This module serves two purposes:
+
+1. **ExoPlayer extractor path**: ExoPlayer auto-detects the decoder via reflection. When present, FLAC files are decoded natively at the extractor level instead of using FFmpeg, delivering raw integer PCM (no float conversion).
+
+2. **NativeAudioEngine dependency**: The `decent-usb-audio-driver` module links against libFLAC (from this module's source tree) for its native C++ FLAC decode engine. The CMake build uses a relative path to `libflac/` — this module must be cloned and set up before building the driver.
 
 ## Setup
 

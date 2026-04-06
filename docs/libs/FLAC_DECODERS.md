@@ -2,7 +2,7 @@
 
 Both libFLAC and FFmpeg can decode FLAC files in the bit-perfect USB audio pipeline. Neither is required -- the pipeline works with either one. Both paths are bit-perfect.
 
-## Two paths, same result
+## Three paths, same result
 
 ### Path 1: FFmpeg (default, no extra dependency)
 
@@ -29,21 +29,37 @@ FLAC file -> FlacExtractor (native) -> raw int PCM -> integer shift -> USB
 - **Bit-perfect**: zero float math in the entire pipeline -- lossless by construction
 - Only works for FLAC files. Non-FLAC formats use the FFmpeg extension (Jellyfin) if present, or the Android built-in MediaCodec decoder.
 
+### Path 3: NativeAudioEngine (native C++ thread, automatic for FLAC + USB)
+
+```
+FLAC file -> NativeAudioEngine (C++ thread) -> FLACParser -> raw PCM -> integer shift -> USB
+```
+
+- Uses `NativeAudioEngine` in the `decent-usb-audio-driver` module
+- A single native C++ thread handles FLAC decode → bit-depth conversion → USB isochronous output
+- **Zero JNI in the hot path** — ExoPlayer only controls play/pause/seek
+- **~10x headroom** on weak CPUs (vs ~1.2x with ExoPlayer pipeline)
+- Activated automatically when USB bit-perfect mode is enabled and the file is FLAC
+- Falls back to Path 1 or 2 for non-FLAC formats
+
+**This is the recommended path for FLAC playback via USB.** It was built to solve pipeline latency issues on devices with weak CPUs (e.g., iBasso DX340) where the ExoPlayer pipeline ran at ~1x real-time.
+
 ## Which should I use?
 
-**Both are bit-perfect.** The choice is about philosophy, not quality:
+**All three paths are bit-perfect.** The choice is largely automatic:
 
-| Aspect | FFmpeg only | FFmpeg + libFLAC |
-|--------|------------|------------------|
-| FLAC quality | Bit-perfect (float x2^N round-trip) | Bit-perfect (zero float, integer only) |
-| Non-FLAC quality | Bit-perfect (float x2^N round-trip) | Same (the FFmpeg extension handles non-FLAC) |
-| Dependencies | 1 decoder lib | 2 decoder libs |
-| APK size | Smaller | +~600KB (libflacJNI.so) |
-| Provability | Mathematically lossless (requires proof) | Trivially lossless (integer shift) |
+| Aspect | FFmpeg only | FFmpeg + libFLAC | NativeAudioEngine |
+|--------|------------|------------------|-------------------|
+| FLAC quality | Bit-perfect (float x2^N) | Bit-perfect (zero float) | Bit-perfect (zero float, zero JNI) |
+| Non-FLAC quality | Bit-perfect (float x2^N) | Same | Falls back to FFmpeg path |
+| Pipeline layers | 6 (Java+JNI+C++) | 6 (Java+JNI+C++) | 1 (C++ only) |
+| CPU headroom (weak device) | ~1.2x | ~1.2x | ~10x |
+| Dependencies | 1 decoder lib | 2 decoder libs | libFLAC (included) |
+| Activation | Always | Always | Automatic (FLAC + USB) |
 
-If you want the simplest setup: **use FFmpeg only**. It handles everything.
+**For USB bit-perfect FLAC playback:** NativeAudioEngine is activated automatically. No configuration needed beyond the standard integration.
 
-If you want zero float in the FLAC path for absolute certainty: **add libFLAC**.
+**For non-FLAC formats:** ExoPlayer pipeline handles them (Path 1 or 2). The NativeAudioEngine only activates for FLAC files.
 
 ## How it works with ExoPlayer
 

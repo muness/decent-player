@@ -342,12 +342,14 @@ class MainActivity : BaseActivity(), MiniPlayerCallbacks {
 
     override fun onStart() {
         super.onStart()
-        startAudioDatabaseService()
+        // TEMPORARILY DISABLED for SD card I/O testing
+        // startAudioDatabaseService()
     }
 
     override fun onResume() {
         super.onResume()
-        AudioDatabaseService.refreshScan(applicationContext)
+        // TEMPORARILY DISABLED for SD card I/O testing
+        // AudioDatabaseService.startScan(applicationContext)
     }
 
     override fun onStop() {

@@ -55,7 +55,8 @@ See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start gui
 - Works on **stock Android 10+**, no root required
 - Pipeline of 20 isochronous URBs with dedicated streaming thread for glitch-free output
 - Protocol-matched rate transition sequence (from xHCI ftrace analysis)
-- **Two bit-perfect paths**: float round-trip (x2^N, all formats via FFmpeg) and zero-float integer (libFLAC, FLAC only)
+- **Three bit-perfect paths**: native C++ engine (FLAC, zero JNI), float round-trip (x2^N, all formats via FFmpeg), and zero-float integer (libFLAC extractor)
+- **NativeAudioEngine**: single C++ thread does FLAC decode → bit-depth conversion → USB output with ~10x headroom even on weak CPUs
 
 ### Verified
 
@@ -72,10 +73,11 @@ ALSA USB card:          none (kernel doesn't touch the DAC)
 AudioFlinger output:    SPEAKER only (not USB)
 Qualcomm PAL:           zero USB activity
 CLOCK_VALID:            true (DAC confirms clock locked)
+NativeAudioEngine:      FLAC decode → USB in single C++ thread (zero JNI)
 Float conversion:       x2^N round-trip (exact for 16/24-bit)
 Raw int path:           zero float, integer shift only (libFLAC)
 URB pipeline:           20 in-flight, zero drops, zero timeouts
-Streaming thread:       dedicated, decoupled from ExoPlayer
+SD card I/O:            18 MB / 30s (vs 1,390 MB before optimization)
 ```
 
 ---
@@ -127,6 +129,12 @@ This repo contains:
 | [Future Work](docs/driver/09-future-work.md) | Known limitations and roadmap |
 | [Samsung Specifics](docs/driver/10-samsung-s26-ultra-specifics.md) | UHQA, Qualcomm PAL, kernel race condition |
 | [Library Architecture](docs/driver/11-standalone-library-architecture.md) | How to package the driver for any Android app |
+
+### Issues (investigation and resolution)
+
+| Document | What's inside |
+|----------|---------------|
+| [Pipeline Latency at High Sample Rates](docs/issues/01-exoplayer-pipeline-latency-high-samplerates.md) | Full investigation: ExoPlayer pipeline overhead on weak CPUs, NativeAudioEngine solution, SD card FUSE I/O contention from metadata scanner |
 
 ### Hardware traces
 

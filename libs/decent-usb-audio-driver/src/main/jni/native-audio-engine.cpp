@@ -34,67 +34,193 @@
 
 // ── MmapDataSource: memory-mapped file for zero-syscall reads ───────
 
-/** Reads entire file into RAM. Zero I/O during decode — eliminates all
- *  SD card latency stalls. (removed) likely does the same thing. */
-class RamDataSource : public DataSource {
-    uint8_t *buffer_;
-    size_t length_;
-public:
-    RamDataSource(int fd, bool ownsFd) : buffer_(nullptr), length_(0) {
-        struct stat st;
-        if (fstat(fd, &st) == 0 && st.st_size > 0) {
-            length_ = (size_t)st.st_size;
-            buffer_ = (uint8_t *)malloc(length_);
-            if (buffer_) {
-                // Read entire file into RAM using sequential read() with large chunks.
-                // pread64 in small chunks was 1.4MB/s on SD card due to syscall overhead.
-                lseek64(fd, 0, SEEK_SET);
-                posix_fadvise(fd, 0, length_, POSIX_FADV_SEQUENTIAL);
-                posix_fadvise(fd, 0, length_, POSIX_FADV_WILLNEED);
-                size_t total = 0;
-                const size_t CHUNK = 4 * 1024 * 1024;  // 4MB chunks — minimizes FUSE roundtrips
-                while (total < length_) {
-                    size_t toRead = length_ - total;
-                    if (toRead > CHUNK) toRead = CHUNK;
-                    ssize_t n = read(fd, buffer_ + total, toRead);
-                    if (n <= 0) break;
-                    total += n;
+/** DataSource with dedicated I/O thread. Decode thread NEVER does disk I/O.
+ *  8MB buffer with compaction. I/O thread is the ONLY thread touching the fd.
+ *  When buffer misses, decode waits for I/O thread to fill (no direct pread64). */
+class AsyncBufferedDataSource : public DataSource {
+    int fd_;
+    bool ownsFd_;
+    off64_t fileLength_;
+
+    uint8_t *buf_;
+    static const size_t BUF_CAP = 8 * 1024 * 1024;
+    static const size_t READ_CHUNK = 128 * 1024;
+
+    // Protected by mutex (shared between I/O thread and decode thread)
+    pthread_mutex_t mu_;
+    pthread_cond_t cond_;   // signal decode thread when data available
+    off64_t bufStart_;
+    size_t bufFilled_;
+    off64_t ioPos_;         // next read position for I/O thread
+    bool seekPending_;
+    off64_t seekTarget_;
+    bool alive_;
+
+    static void *ioLoop(void *arg) {
+        auto *ds = static_cast<AsyncBufferedDataSource *>(arg);
+        uint8_t *tempBuf = (uint8_t *)malloc(READ_CHUNK);
+
+        while (true) {
+            pthread_mutex_lock(&ds->mu_);
+            if (!ds->alive_) { pthread_mutex_unlock(&ds->mu_); break; }
+
+            if (ds->seekPending_) {
+                ds->bufStart_ = ds->seekTarget_;
+                ds->bufFilled_ = 0;
+                ds->ioPos_ = ds->seekTarget_;
+                ds->seekPending_ = false;
+            }
+
+            if (ds->bufFilled_ >= BUF_CAP) {
+                pthread_mutex_unlock(&ds->mu_);
+                usleep(5000);
+                continue;
+            }
+
+            off64_t readPos = ds->ioPos_;
+            size_t space = BUF_CAP - ds->bufFilled_;
+            pthread_mutex_unlock(&ds->mu_);
+
+            // Read into TEMP buffer (not main buffer — avoids race with compaction)
+            size_t toRead = space < READ_CHUNK ? space : READ_CHUNK;
+            ssize_t n = pread64(ds->fd_, tempBuf, toRead, readPos);
+
+            if (n > 0) {
+                pthread_mutex_lock(&ds->mu_);
+                if (ds->ioPos_ == readPos && !ds->seekPending_) {
+                    // Copy to CURRENT end of buffer (safe — mutex held)
+                    size_t currentFilled = ds->bufFilled_;
+                    if (currentFilled + n <= BUF_CAP) {
+                        memcpy(ds->buf_ + currentFilled, tempBuf, n);
+                        ds->bufFilled_ = currentFilled + n;
+                        ds->ioPos_ += n;
+                    }
+                    pthread_cond_signal(&ds->cond_);
                 }
-                if (total < length_) {
-                    LOGE("RamDataSource: read only %zu of %zu bytes", total, length_);
-                    length_ = total;
-                }
-                LOGI("RamDataSource: loaded %zu bytes into RAM", length_);
+                pthread_mutex_unlock(&ds->mu_);
             } else {
-                LOGE("RamDataSource: malloc(%zu) failed", length_);
-                length_ = 0;
+                usleep(5000);
             }
         }
-        if (ownsFd && fd >= 0) close(fd);
+        free(tempBuf);
+        return nullptr;
     }
 
-    ~RamDataSource() override {
-        free(buffer_);
+    pthread_t ioThread_;
+public:
+    AsyncBufferedDataSource(int fd, bool ownsFd) : fd_(fd), ownsFd_(ownsFd),
+            fileLength_(0), buf_(nullptr), bufStart_(0), bufFilled_(0),
+            ioPos_(0), seekPending_(false), seekTarget_(0), alive_(true) {
+        struct stat st;
+        if (fstat(fd, &st) == 0) fileLength_ = st.st_size;
+        buf_ = (uint8_t *)malloc(BUF_CAP);
+        pthread_mutex_init(&mu_, nullptr);
+        pthread_cond_init(&cond_, nullptr);
+        posix_fadvise(fd, 0, fileLength_, POSIX_FADV_SEQUENTIAL);
+        // Only readahead first 2MB — enough for FLAC metadata + initial frames.
+        // Reading the entire file monopolizes the FUSE daemon on SD cards,
+        // blocking our pread64 calls (measured: >5s timeout for 128KB).
+        off64_t raSize = fileLength_ < 2*1024*1024 ? fileLength_ : 2*1024*1024;
+        readahead(fd, 0, raSize);
+        pthread_create(&ioThread_, nullptr, ioLoop, this);
+        LOGI("AsyncBufferedDataSource: fd=%d size=%lld (8MB buf, readahead issued)",
+             fd, (long long)fileLength_);
+    }
+
+    ~AsyncBufferedDataSource() override {
+        pthread_mutex_lock(&mu_);
+        alive_ = false;
+        pthread_mutex_unlock(&mu_);
+        pthread_join(ioThread_, nullptr);
+        pthread_mutex_destroy(&mu_);
+        pthread_cond_destroy(&cond_);
+        free(buf_);
+        if (ownsFd_ && fd_ >= 0) close(fd_);
     }
 
     ssize_t readAt(off64_t offset, void *const data, size_t size) override {
-        if (!buffer_ || offset >= (off64_t)length_) return 0;
-        size_t available = length_ - (size_t)offset;
-        if (size > available) size = available;
-        memcpy(data, buffer_ + offset, size);
+        if (offset >= fileLength_) return 0;
+
+        pthread_mutex_lock(&mu_);
+
+        // Fast path: data is already in buffer
+        if (offset >= bufStart_ && (size_t)(offset - bufStart_) + size <= bufFilled_) {
+            memcpy(data, buf_ + (offset - bufStart_), size);
+
+            // Compact when consumed past half
+            size_t consumed = (size_t)(offset + size - bufStart_);
+            if (consumed > BUF_CAP / 2 && bufFilled_ > consumed) {
+                size_t remaining = bufFilled_ - consumed;
+                memmove(buf_, buf_ + consumed, remaining);
+                bufStart_ = offset + size;
+                bufFilled_ = remaining;
+            }
+            pthread_mutex_unlock(&mu_);
+            return (ssize_t)size;
+        }
+
+        // Partial hit: return what we have
+        if (offset >= bufStart_ && offset < bufStart_ + (off64_t)bufFilled_) {
+            size_t avail = (size_t)(bufStart_ + bufFilled_ - offset);
+            memcpy(data, buf_ + (offset - bufStart_), avail);
+            pthread_mutex_unlock(&mu_);
+            return (ssize_t)avail;
+        }
+
+        // Miss: data not in buffer. For small reads (e.g., FLAC seek binary search),
+        // do a direct pread64 — much faster than waiting for the I/O thread to
+        // seek+fill, especially on SD card through FUSE.
+        if (size <= 64 * 1024) {
+            pthread_mutex_unlock(&mu_);
+            ssize_t n = pread64(fd_, data, size, offset);
+            return n > 0 ? n : 0;
+        }
+
+        // Large miss: redirect I/O thread and wait
+        seekTarget_ = offset;
+        seekPending_ = true;
+
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 15;
+
+        while (!(offset >= bufStart_ && (size_t)(offset - bufStart_) + size <= bufFilled_)) {
+            if (offset >= bufStart_ && offset < bufStart_ + (off64_t)bufFilled_) {
+                size_t avail = (size_t)(bufStart_ + bufFilled_ - offset);
+                memcpy(data, buf_ + (offset - bufStart_), avail);
+                pthread_mutex_unlock(&mu_);
+                return (ssize_t)avail;
+            }
+            int rc = pthread_cond_timedwait(&cond_, &mu_, &deadline);
+            if (rc != 0) {
+                LOGW("readAt: timeout waiting for data @ %lld", (long long)offset);
+                pthread_mutex_unlock(&mu_);
+                return 0;
+            }
+        }
+
+        memcpy(data, buf_ + (offset - bufStart_), size);
+
+        size_t consumed = (size_t)(offset + size - bufStart_);
+        if (consumed > BUF_CAP / 2 && bufFilled_ > consumed) {
+            size_t remaining = bufFilled_ - consumed;
+            memmove(buf_, buf_ + consumed, remaining);
+            bufStart_ = offset + size;
+            bufFilled_ = remaining;
+        }
+
+        pthread_mutex_unlock(&mu_);
         return (ssize_t)size;
     }
 
-    off64_t getLength() override {
-        return buffer_ ? (off64_t)length_ : -1;
-    }
+    off64_t getLength() override { return fileLength_; }
 };
 
 // ── NativeAudioEngine ───────────────────────────────────────────────
 
 struct NativeAudioEngine {
     // Input
-    RamDataSource *dataSource;
+    AsyncBufferedDataSource *dataSource;
     FLACParser *parser;
 
     // USB output (owned by UsbAudioStream on the Java side)
@@ -259,7 +385,7 @@ Java_com_decent_usbaudio_NativeAudioEngine_nativeCreateFromFd(
         return 0;
     }
 
-    auto *ds = new RamDataSource(ownedFd, true);
+    auto *ds = new AsyncBufferedDataSource(ownedFd, true);
     auto *parser = new FLACParser(ds);
 
     if (!parser->init()) {

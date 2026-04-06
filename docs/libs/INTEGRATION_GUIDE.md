@@ -191,38 +191,65 @@ No app code is needed to distinguish the paths.
 
 **Note on `buildAudioRenderers()`:** You do NOT need to override `buildAudioRenderers()` or remove any renderers. When libFLAC is in the classpath, ExoPlayer's `FlacExtractor` decodes FLAC at the extractor level (before any renderer is consulted), so renderer selection is irrelevant for FLAC files.
 
-### Step 5: Build the ExoPlayer
+### Step 5: Build the ExoPlayer with NativeEngineAwareLoadControl
+
+Wrap the `LoadControl` with `NativeEngineAwareLoadControl` to prevent ExoPlayer from reading the audio file when the native engine is active. Without this, ExoPlayer's `FlacExtractor` reads the same file in parallel, causing SD card I/O contention through Android's FUSE layer.
 
 ```kotlin
+import com.decent.usbaudio.media3.NativeEngineAwareLoadControl
+
+val defaultLoadControl = DefaultLoadControl.Builder()
+    .setBufferDurationsMs(5000, 15000, 2000, 3000)
+    .build()
+
+// Wrap: stops ExoPlayer loading when native engine handles decode+USB
+val loadControl = NativeEngineAwareLoadControl(defaultLoadControl) {
+    currentUsbSink?.isNativeEngineActive == true
+}
+
 val player = ExoPlayer.Builder(this)
     .setRenderersFactory(createRenderersFactory())
+    .setLoadControl(loadControl)
     .build()
 ```
 
-### Step 6: Set Track Bit Depth on Each Track Transition
+**Why this matters:** Without the LoadControl wrapper, ExoPlayer reads the audio file at full speed through its extractor, even though the native engine is also reading it. On SD cards through FUSE, this caused 1.4 GB of reads in 30 seconds (vs 18 MB with the wrapper). The wrapper stops all loading when the engine is active, but allows one post-seek chunk through so `handleBuffer()` can capture `presentationTimeUs` for position tracking.
 
-The sink needs to know the source file's bit depth so it can select the correct USB alt setting and verify bit-perfect delivery. Set it **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
+### Step 6: Set Track Bit Depth and File Path on Each Track Transition
+
+The sink needs the source file's bit depth (for USB alt setting selection) and file path (for the NativeAudioEngine). Set both **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
 
 ```kotlin
 player.addListener(object : Player.Listener {
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
         mediaItem?.let { item ->
             val audioId = item.mediaId.toLongOrNull() ?: return@let
-            
-            // Get bit depth from your metadata source.
-            // This MUST be synchronous (runBlocking) so the bit depth is set
-            // before ExoPlayer calls configure() on the audio sink.
             val usbSink = currentUsbSink ?: return@let
+            
+            // MUST be synchronous (runBlocking) so bit depth and path are set
+            // before ExoPlayer calls configure() on the audio sink.
             runBlocking(Dispatchers.IO) {
                 val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
+                
+                // Clean up finished engine from previous track
+                usbSink.cleanupFinishedEngine()
+                
+                // Set metadata BEFORE configure() fires
                 usbSink.trackBitDepth = audio.bitPerSample.toInt()  // 16, 24, or 32
+                usbSink.currentTrackPath = audio.path               // file path for NativeAudioEngine
+                
+                // Create native engine immediately (if FLAC + USB active).
+                // Don't wait for handleBuffer — path must be set first.
+                usbSink.createEngineIfNeeded()
             }
         }
     }
 })
 ```
 
-**Why synchronous?** ExoPlayer calls `onMediaItemTransition` then `configure()` on the sink. If `trackBitDepth` isn't set before `configure()` runs, the sink uses the previous track's bit depth for logging/verification.
+**Why `currentTrackPath`?** The `NativeAudioEngine` opens the FLAC file directly via `open()` + file descriptor, bypassing ExoPlayer's DataSource. The path must be set before the engine is created. For non-FLAC files, the path is ignored and ExoPlayer's pipeline handles playback normally.
+
+**Why synchronous?** ExoPlayer calls `onMediaItemTransition` then `configure()` on the sink. If the path and bit depth aren't set before `configure()` runs, the engine either fails to create or uses stale metadata.
 
 ### Step 7: Configuration Options (Optional)
 
@@ -247,17 +274,21 @@ See the Felicity Music Player integration in `driver/Felicity/`:
 
 ### Lifecycle Details
 
-The `UsbAudioSink` manages the USB stream lifecycle automatically:
+The `UsbAudioSink` manages both the USB stream and NativeAudioEngine lifecycle automatically:
 
 | ExoPlayer Event | What UsbAudioSink Does |
 |-------|-------------|
-| `configure(format)` | Opens USB device, claims interface, sets sample rate via UAC2 sequence, starts streaming thread |
-| Track change (same rate) | Cache hit — stream continues, no reconfiguration |
-| Track change (different rate) | Full UAC2 transition: stop thread -> drain URBs -> setAlt(0) -> SET_CUR -> CLOCK_VALID -> setAlt(0) -> setAlt(N) -> sleep(50ms) -> start |
-| `flush()` | Clears the streaming queue (for seeks/discontinuities) |
-| `reset()` | USB stream **survives** — ExoPlayer calls reset() frequently on track changes, killing USB here causes audio to briefly route to speaker |
-| `release()` | Full cleanup: stop streaming thread, drain all URBs, release native resources |
-| Stale fd detected | setAlt(0) fails -> auto close/reopen USB device with fresh fd |
+| `configure(format)` | Opens USB device, claims interface, sets sample rate via UAC2 sequence. If FLAC + currentTrackPath set → creates NativeAudioEngine (paused). If non-FLAC → starts streaming thread. |
+| Track change (same rate) | If engine running same track → defers reconfiguration. If new track → destroys old engine, creates new one. |
+| Track change (different rate) | Full UAC2 transition: stop engine/thread → drain URBs → setAlt(0) → SET_CUR → CLOCK_VALID → setAlt(0) → setAlt(N) → sleep(50ms) → start |
+| `handleBuffer()` | If NativeAudioEngine active → captures `presentationTimeUs` for position, seeks engine, returns true (ignores data). If no engine → routes to streaming thread (float or raw path). |
+| `flush()` | Temporarily unblocks LoadControl (sets `isNativeEngineActive=false`) so ExoPlayer loads one post-seek chunk. Engine seek happens in next `handleBuffer()`. |
+| `play()` / `pause()` | Forwards to NativeAudioEngine.resume()/pause(). Respects `engineNeedsInitialSeek` flag. |
+| `getCurrentPositionUs()` | If engine active → `windowOffsetUs + engine.getPositionUs()`. If streaming thread → `startMediaTimeUs + framesWritten`. |
+| `isEnded()` | If engine running → false. If engine finished → delegates to super (triggers track transition). |
+| `reset()` | USB stream **survives** — ExoPlayer calls reset() frequently, killing USB here causes audio to briefly route to speaker |
+| `release()` | Full cleanup: stop engine, stop streaming thread, drain all URBs, release native resources |
+| Stale fd detected | setAlt(0) fails → auto close/reopen USB device with fresh fd |
 
 ### enableFloatOutput: When and Why
 

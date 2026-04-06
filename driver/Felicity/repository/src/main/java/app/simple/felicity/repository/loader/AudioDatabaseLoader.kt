@@ -34,6 +34,12 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
         private const val MIN_SEMAPHORE_PERMITS = 4
         private const val BATCH_SIZE = 50 // Number of audio items to accumulate before inserting to database
 
+        /** Set true to pause the scanner while native audio engine is playing.
+         *  Prevents SD card I/O contention through FUSE. */
+        @Volatile
+        @JvmStatic
+        var playbackActive: Boolean = false
+
         data class IndexedFile(val lastModified: Long, val size: Long, val id: Long = 0L, val isFavorite: Boolean = false, val alwaysSkip: Boolean = false)
     }
 
@@ -75,7 +81,7 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
 
         try {
             val startTime = System.currentTimeMillis()
-            Log.d(TAG, "Starting audio file processing...")
+            Log.i(TAG, "SCAN START ════════════════════════════════════════")
             val storages = RemovableStorageDetector.getAllStorageVolumes(context)
             val dao = audioDatabase.audioDao()
 
@@ -107,18 +113,39 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
             val updateBatchList = mutableListOf<Audio>()
             val batchMutex = Mutex()
 
+            var totalFiles = 0
+            var totalToProcess = 0
+            var totalSkipped = 0
+
             storages.forEach { storage ->
                 // Check for cancellation before processing each storage
                 scanScope.coroutineContext.ensureActive()
 
-                val audioFiles = AudioScanner().getAudioFiles(storage.path!!)
-                Log.d(TAG, "Found ${audioFiles.size} audio files in ${storage.path}")
+                val storagePath = storage.path!!
+                val pathStr = storagePath.absolutePath
+                val isSDCard = storage.isRemovable
+                val storageLabel = if (isSDCard) "SD_CARD" else "INTERNAL"
+                val audioFiles = AudioScanner().getAudioFiles(storagePath)
+                totalFiles += audioFiles.size
+                Log.i(TAG, "SCAN [$storageLabel] Found ${audioFiles.size} audio files in $pathStr")
+
+                var storageProcessed = 0
+                var storageSkipped = 0
 
                 audioFiles.forEach { file ->
                     // Check for cancellation before processing each file
                     scanScope.coroutineContext.ensureActive()
 
+                    // Yield to playback: pause scanning while native engine is active.
+                    // SD card FUSE I/O from scanning competes with playback decode.
+                    while (playbackActive) {
+                        kotlinx.coroutines.delay(500)
+                        scanScope.coroutineContext.ensureActive()
+                    }
+
                     if (shouldProcess(file)) {
+                        storageProcessed++
+                        totalToProcess++
                         val processingJob = scanScope.launch {
                             semaphore.acquire()
                             try {
@@ -190,9 +217,16 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                         synchronized(activeJobs) {
                             activeJobs.add(processingJob)
                         }
+                    } else {
+                        storageSkipped++
+                        totalSkipped++
                     }
                 }
+
+                Log.i(TAG, "SCAN [$storageLabel] Done: ${storageProcessed} to process, ${storageSkipped} skipped (unchanged)")
             }
+
+            Log.i(TAG, "SCAN TOTAL: ${totalFiles} files, ${totalToProcess} to process, ${totalSkipped} skipped")
 
             // Wait for all processing jobs to complete
             val jobsToWait = synchronized(activeJobs) { activeJobs.toList() }
@@ -211,7 +245,7 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                 updateBatchList.clear()
             }
 
-            Log.d(TAG, "Audio file processing complete in ${(System.currentTimeMillis() - startTime) / 1000} seconds.")
+            Log.i(TAG, "SCAN COMPLETE ═══════════════════════════════════ (${(System.currentTimeMillis() - startTime) / 1000}s)")
         } catch (e: CancellationException) {
             // Scan was canceled - this is expected behavior
             Log.d(TAG, "Audio file processing canceled")
@@ -364,9 +398,8 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
      * This is the safe path for "refresh on resume" – it never silently drops the request.
      */
     suspend fun cancelAndRestartScan() {
-        Log.d(TAG, "cancelAndRestartScan: tearing down current scan")
+        Log.w(TAG, "SCAN FORCE-RESTART: canceling current scan and starting fresh!")
         cancelCurrentScan()
-        Log.d(TAG, "cancelAndRestartScan: starting fresh scan")
         processAudioFiles()
     }
 
@@ -414,7 +447,7 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
         val existing = indexedMap[file.absolutePath]
 
         if (existing == null) {
-            Log.d(TAG, "New file (not in index): ${file.name}")
+            Log.i(TAG, "SCAN NEW: ${file.name}")
             return true   // new file
         }
 
@@ -422,15 +455,14 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
         val fileModified = file.lastModified()
 
         if (existing.size != fileSize) {
-            Log.d(TAG, "Size changed for ${file.name}: DB=${existing.size}, File=$fileSize")
+            Log.i(TAG, "SCAN CHANGED (size): ${file.name} DB=${existing.size} File=$fileSize")
             return true          // changed
         }
 
         if (existing.lastModified != fileModified) {
-            Log.d(TAG, "Modified time changed for ${file.name}: DB=${existing.lastModified}, File=$fileModified")
+            Log.i(TAG, "SCAN CHANGED (mtime): ${file.name} DB=${existing.lastModified} File=$fileModified")
             return true
         }
-
 
         return false                                             // unchanged → skip
     }

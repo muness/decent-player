@@ -42,6 +42,20 @@ class UsbAudioSink(
     /** Source file bit depth (16, 24, 32). Set by the app on each track transition. */
     var trackBitDepth: Int = 0
 
+    /** True when the native engine is running. Read by [NativeEngineAwareLoadControl]
+     *  to stop ExoPlayer from loading data (prevents SD card I/O contention).
+     *  Temporarily set to false during seek to allow one post-seek load. */
+    @Volatile
+    var isNativeEngineActive: Boolean = false
+        private set
+
+    /** True whenever a native engine EXISTS (created, not yet destroyed).
+     *  Unlike [isNativeEngineActive], this is NOT toggled during seek.
+     *  Used to pause the metadata scanner during playback. */
+    @Volatile
+    var hasNativeEngine: Boolean = false
+        private set
+
     /** File path of the current track. Set by the app on each track transition.
      *  When non-null and pointing to a FLAC file, the native audio engine is used. */
     var currentTrackPath: String? = null
@@ -53,6 +67,7 @@ class UsbAudioSink(
         if (engine != null && !engine.isRunning) {
             engine.destroy()
             nativeEngine = null
+            isNativeEngineActive = false
             activeEnginePath = null
             windowOffsetUs = -1L
             usbStartMediaTimeNeedsInit = true
@@ -179,6 +194,7 @@ class UsbAudioSink(
             oldEngine.stop()
             oldEngine.destroy()
             nativeEngine = null
+            isNativeEngineActive = false
             activeEnginePath = null
             Log.i(TAG, "configure: destroyed old engine")
         }
@@ -258,9 +274,14 @@ class UsbAudioSink(
                         Log.i(TAG, "Native engine seek to ${flacPositionUs / 1_000_000}s (playing=$isPlaying)")
                     }
                 }
+                // Re-block LoadControl now that we have the position.
+                // flush() temporarily unblocked it to allow this handleBuffer call.
+                if (nativeEngine?.isRunning == true) {
+                    isNativeEngineActive = true
+                }
             }
 
-            // Native FLAC engine handles decode+USB directly — ignore ExoPlayer data
+            // Native FLAC engine handles decode+USB directly — ignore ExoPlayer data.
             val engine = nativeEngine
             if (engine != null) {
                 if (engine.isRunning) {
@@ -273,6 +294,7 @@ class UsbAudioSink(
                 Log.i(TAG, "Native engine finished — cleaning up for next track")
                 engine.destroy()
                 nativeEngine = null
+                isNativeEngineActive = false
                 activeEnginePath = null
                 windowOffsetUs = -1L
                 usbStartMediaTimeNeedsInit = true
@@ -415,6 +437,13 @@ class UsbAudioSink(
         usbAudioStream?.flush()
         usbStartMediaTimeNeedsInit = true
         handledEndOfStream = false
+        // Temporarily unblock LoadControl so ExoPlayer loads at least one chunk
+        // after seek. handleBuffer will re-block once it captures presentationTimeUs.
+        // Without this, the LoadControl blocks ALL post-seek loading and the engine
+        // never knows where to seek to.
+        if (nativeEngine?.isRunning == true) {
+            isNativeEngineActive = false
+        }
     }
 
     override fun reset() {
@@ -585,6 +614,8 @@ class UsbAudioSink(
                         // the correct seek position from ExoPlayer's presentationTimeUs.
                         engine.pause()
                         nativeEngine = engine
+                        isNativeEngineActive = true
+                        hasNativeEngine = true
                         engineNeedsInitialSeek = true
                         activeEnginePath = path
                         Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name}")
@@ -617,6 +648,7 @@ class UsbAudioSink(
         nativeEngine?.stop()
         nativeEngine?.destroy()
         nativeEngine = null
+        isNativeEngineActive = false
 
         // Stop the streaming thread (drains queue, joins thread)
         usbStreamingThread?.stop()

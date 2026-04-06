@@ -8,7 +8,8 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 - **Automatic sample rate switching** — DAC switches to match the source file (44.1kHz, 48kHz, 96kHz, 192kHz, etc.)
 - **Automatic bit depth handling** — 16-bit and 24-bit sources are zero-padded to the DAC's native format
 - **Seamless track transitions** — xHCI-verified transition sequence for reliable rate changes
-- **Two bit-perfect paths** — float round-trip (FFmpeg, all formats) and zero-float integer (libFLAC, FLAC only)
+- **NativeAudioEngine** — single C++ thread: FLAC decode → USB output, zero JNI in hot path, ~10x headroom on weak CPUs
+- **Three bit-perfect paths** — native engine (FLAC), float round-trip (FFmpeg, all formats), zero-float integer (libFLAC extractor)
 - **Works with any USB Audio Class 2.0 DAC**
 
 ## Requirements

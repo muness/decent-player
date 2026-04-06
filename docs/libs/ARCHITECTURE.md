@@ -111,6 +111,51 @@ ExoPlayer Render Thread
 
 **Key difference:** Path 2 has zero float math in the entire pipeline. The original integer samples from the FLAC file reach the DAC with only a lossless bit shift.
 
+### Path 3: NativeAudioEngine (native C++ thread, FLAC only)
+
+Bypasses the entire ExoPlayer audio pipeline. A single native thread handles decode → USB directly. Activated automatically for FLAC files when USB bit-perfect is enabled. Falls back to Path 1 or 2 for non-FLAC formats.
+
+```
+FLAC File (fd from Java)
+    |
+    v
++---------------------------------------------+
+| NativeAudioEngine (C++, single pthread)     |
+|                                             |
+| AsyncBufferedDataSource                     |
+|   - 8MB ring buffer with I/O thread         |
+|   - readahead for sequential decode          |
+|   - Direct pread64 for small reads (seek)    |
+|       |                                     |
+|       v                                     |
+| FLACParser (xiph/flac)                      |
+|   - Decode FLAC frame → raw PCM             |
+|   - seekAbsolute for sample-accurate seek    |
+|       |                                     |
+|       v                                     |
+| Bit-depth conversion                        |
+|   - padInt16ToInt32 / padInt24ToInt32        |
+|       |                                     |
+|       v                                     |
+| submitPcmToUrbs (USB isochronous output)    |
+|   - Blocks on URB reap = natural backpressure|
+|   - ~0.11ms per 1ms of audio                |
++---------------------------------------------+
+           | ioctl(USBDEVFS_SUBMITURB)
+           v
+       USB DAC
+```
+
+**Key advantages over Path 1/2:**
+- **Zero JNI in the hot path** — decode, convert, and USB all in one C++ thread
+- **Zero Java queues** — submitPcmToUrbs blocks naturally on URB reap (DAC clock backpressure)
+- **~10x headroom** on iBasso DX340 (was ~1.2x with ExoPlayer pipeline)
+- **SD card optimized** — AsyncBufferedDataSource with direct pread64 for FLAC seek binary search
+
+ExoPlayer remains active for playlist management, media session (lock screen, notifications), position tracking (via `engine.getPositionUs()`), and track transitions. A custom `NativeEngineAwareLoadControl` stops ExoPlayer from loading the same file in parallel (prevents FUSE I/O contention on SD cards).
+
+**Automatic fallback:** Non-FLAC formats (MP3, AAC, WAV) use Path 1 or 2 via the ExoPlayer pipeline. The `UsbAudioSink` handles the routing transparently.
+
 ## Modules
 
 ### `decent-usb-audio-driver` (Core)
@@ -122,8 +167,10 @@ Native USB Audio Class 2.0 driver. Communicates directly with the DAC via Linux 
 | `UsbAudioDevice` | `UsbAudioDevice.kt` | Device discovery, permissions, descriptor parsing, clock control |
 | `UsbAudioStream` | `UsbAudioStream.kt` | JNI wrapper for native stream (create, start, write, writeRaw, stop, drain, release) |
 | `UsbAudioPermissionHelper` | `UsbAudioPermissionHelper.kt` | Handle USB_DEVICE_ATTACHED intent, request permission, claim device |
+| `NativeAudioEngine` | `NativeAudioEngine.kt` | Kotlin JNI wrapper for native FLAC decode → USB engine |
 | Native driver | `usb-audio-output.cpp` | URB ring buffer, float->int conversion, raw int padding, ISO packet scheduling |
-| Native header | `usb-audio-output.h` | Context struct, ring buffer slots, constants |
+| Native engine | `native-audio-engine.cpp` | C++ FLAC decode loop, AsyncBufferedDataSource, JNI entry points |
+| Native headers | `usb-audio-output.h`, `native-audio-engine.h` | Context structs, ring buffer slots, constants |
 
 ### `decent-usb-audio-wrapper-media3` (ExoPlayer Integration)
 
@@ -131,8 +178,9 @@ Drop-in `ForwardingAudioSink` for Media3/ExoPlayer apps.
 
 | Component | File | Role |
 |-----------|------|------|
-| `UsbAudioSink` | `UsbAudioSink.kt` | ForwardingAudioSink with USB routing, rate transitions, stale fd detection, dual-path handleBuffer (float + raw) |
-| `UsbStreamingThread` | `UsbStreamingThread.kt` | Producer-consumer queue decoupling render thread from USB timing; supports FloatBuffer and RawBuffer types |
+| `UsbAudioSink` | `UsbAudioSink.kt` | ForwardingAudioSink with USB routing, NativeAudioEngine management, rate transitions, stale fd detection, tri-path handleBuffer (native engine / float / raw) |
+| `NativeEngineAwareLoadControl` | `NativeEngineAwareLoadControl.kt` | LoadControl wrapper that stops ExoPlayer file loading when native engine is active (prevents SD card FUSE I/O contention) |
+| `UsbStreamingThread` | `UsbStreamingThread.kt` | Producer-consumer queue decoupling render thread from USB timing; supports FloatBuffer and RawBuffer types, pause/resume |
 | `UsbAudioSinkConfig` | `UsbAudioSinkConfig.kt` | Configuration (bitPerfectEnabled, forceRouteToSpeaker) |
 | `PcmUtils` | `PcmUtils.kt` | PCM encoding detection, bytes-per-sample, float conversion utilities |
 
@@ -147,6 +195,22 @@ Native FLAC decoder built from xiph/flac source. Decodes FLAC at the extractor l
 | `FlacLibrary` | `FlacLibrary.java` | Native library loader (libflacJNI.so) |
 
 ## Thread Model
+
+### With NativeAudioEngine (FLAC files, USB bit-perfect)
+
+```
+Thread                    Responsibility                     Blocks on
+---                       ---                                ---
+NativeAudioEngine decode  FLAC decode → convert → USB        URB reap (~1ms per URB)
+NativeAudioEngine I/O     Async file read (8MB buffer)       pread64 (~varies)
+ExoPlayer Render          handleBuffer returns true (no-op)  N/A (idle)
+ExoPlayer Loader          Blocked by LoadControl             N/A (stopped)
+Main/UI                   Lifecycle, permissions              N/A
+```
+
+The native engine's decode thread and I/O thread are the only active threads during FLAC playback. ExoPlayer's render thread is idle (handleBuffer instantly returns true), and the loader is blocked by `NativeEngineAwareLoadControl`.
+
+### Without NativeAudioEngine (non-FLAC, or fallback)
 
 ```
 Thread                  Responsibility                    Blocks on
