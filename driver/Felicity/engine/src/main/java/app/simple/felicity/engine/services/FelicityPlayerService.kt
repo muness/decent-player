@@ -180,13 +180,18 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // Initialize the RenderersFactory once.
         renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableOffload: Boolean): AudioSink {
-                // Determine float output based on decoder choice:
-                // - libFLAC: enableFloatOutput=false → delivers raw int (true bit-perfect, zero float)
-                // - FFmpeg: enableFloatOutput=true → delivers float (bit-perfect via ×2^N round-trip)
-                val useLibFlac = AudioPreferences.isBitPerfectUsbEnabled()
-                        && AudioPreferences.getFlacDecoder() == AudioPreferences.FLAC_LIBFLAC
-                val hiresEnabled = if (useLibFlac) {
-                    false  // libFLAC delivers raw int — no float needed
+                // With libFLAC in classpath: FLAC is decoded at the extractor level
+                // (raw int, zero float). For non-FLAC formats (MP3, AAC), FFmpeg
+                // delivers float with enableFloatOutput=true (bit-perfect via ×2^N).
+                // enableFloatOutput=false so libFLAC delivers native int for FLAC;
+                // FFmpeg still handles non-FLAC as float when Hi-Res is enabled.
+                val hasLibFlac = try {
+                    Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
+                    true
+                } catch (_: ClassNotFoundException) { false }
+
+                val hiresEnabled = if (AudioPreferences.isBitPerfectUsbEnabled() && hasLibFlac) {
+                    false  // libFLAC delivers raw int for FLAC, no float needed
                 } else {
                     AudioPreferences.isHiresOutputEnabled() || AudioPreferences.isBitPerfectUsbEnabled()
                 }
@@ -283,6 +288,11 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         eventListener,
                         out
                 )
+
+                // Note: LibflacAudioRenderer is NOT removed here. When libFLAC is in
+                // the classpath, ExoPlayer's FlacExtractor decodes FLAC at the extractor
+                // level (producing raw int PCM), making renderer selection irrelevant
+                // for FLAC files. Both libFLAC and FFmpeg paths are bit-perfect.
             }
         }
 
@@ -950,6 +960,8 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 Log.d(TAG, "Hi-Res output preference changed to: $hiresEnabled")
                 switchAudioMode()
             }
+            // FLAC decoder is auto-detected: libFLAC when in classpath, FFmpeg otherwise.
+            // No runtime toggle — FlacExtractor decodes at the extractor level.
             AudioPreferences.GAPLESS_PLAYBACK -> {
                 // Reconfigure gapless playback when preference changes
                 configureGaplessPlayback()

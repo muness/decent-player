@@ -14,9 +14,16 @@ dependencies {
     // ExoPlayer/Media3 AudioSink wrapper
     implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
     
-    // FFmpeg decoder — REQUIRED for bit-perfect. The Android built-in decoder
-    // truncates 24-bit to 16-bit. FFmpeg delivers genuine float32 for all sources.
+    // FFmpeg decoder — REQUIRED for bit-perfect non-FLAC formats. The Android
+    // built-in decoder truncates 24-bit to 16-bit. FFmpeg delivers genuine
+    // float32 for all sources.
     implementation 'org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1'
+    
+    // Optional: Native FLAC decoder (zero-float integer path for FLAC files).
+    // When present, FLAC is decoded to raw int PCM at the extractor level —
+    // zero float math in the entire pipeline. When absent, FFmpeg handles
+    // FLAC via the float path (also bit-perfect via x2^N round-trip).
+    implementation 'com.decent:media3-decoder-flac:1.0.0'
     
     // Media3 (your app probably already has these)
     implementation 'androidx.media3:media3-exoplayer:1.9.3'
@@ -102,9 +109,9 @@ class MainActivity : AppCompatActivity() {
 ### Step 4: Create RenderersFactory with UsbAudioSink
 
 In your player service or activity, create a custom `DefaultRenderersFactory` that:
-1. Forces FFmpeg decoder (for bit-perfect float output)
+1. Forces FFmpeg decoder (for bit-perfect float output on non-FLAC formats)
 2. Creates `UsbAudioSink` as the audio sink
-3. Enables float output (preserves 24-bit precision via float32 mantissa)
+3. Conditionally enables float output based on libFLAC availability
 4. Keeps a reference to the sink for track bit depth updates
 
 ```kotlin
@@ -127,13 +134,24 @@ class MyPlayerService : ... {
                 enableFloatOutput: Boolean,
                 enableOffload: Boolean
             ): AudioSink {
-                // CRITICAL: enableFloatOutput MUST be true for bit-perfect.
-                // Without it, the FFmpeg decoder truncates 24-bit sources to 16-bit.
-                // With it, FFmpeg normalizes int→float by dividing by 2^N (exact in
-                // float32 for 16-bit and 24-bit). Our C++ driver reconverts by
-                // multiplying by 2^N — exact round-trip, zero precision loss.
+                // Detect libFLAC at runtime. When present, FLAC files are decoded
+                // at the extractor level (FlacExtractor), delivering raw integer PCM.
+                val hasLibFlac = try {
+                    Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
+                    true
+                } catch (_: ClassNotFoundException) { false }
+                
+                // enableFloatOutput logic:
+                // - With libFLAC:    false — libFLAC delivers raw int for FLAC,
+                //                    The FFmpeg extension still handles non-FLAC as float when
+                //                    EXTENSION_RENDERER_MODE_PREFER is set.
+                // - Without libFLAC: true  — FFmpeg delivers float32 for everything.
+                //                    Required for 24-bit precision (Android's built-in
+                //                    decoder truncates 24-bit to 16-bit).
+                val useFloat = !hasLibFlac
+
                 val delegate = DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(true)
+                    .setEnableFloatOutput(useFloat)
                     .setAudioCapabilities(AudioCapabilities.getCapabilities(context))
                     // Add your audio processors here if needed (EQ, balance, etc.)
                     // .setAudioProcessors(arrayOf(...))
@@ -145,7 +163,7 @@ class MyPlayerService : ... {
             }
         }
         
-        // CRITICAL: Force FFmpeg decoder. The Android built-in MediaCodec decoder
+        // Force FFmpeg decoder. The Android built-in MediaCodec decoder
         // outputs PCM_16BIT for all sources, even 24-bit FLAC. FFmpeg outputs
         // genuine PCM_FLOAT with full precision.
         factory.setExtensionRendererMode(
@@ -157,6 +175,22 @@ class MyPlayerService : ... {
 }
 ```
 
+**How the two decoding paths work:**
+
+| Format | libFLAC in classpath? | Decoder used | Output encoding | Float math? |
+|--------|----------------------|-------------|----------------|-------------|
+| FLAC | Yes | libFLAC (FlacExtractor) | `PCM_16BIT` or `PCM_32BIT` (raw int) | No |
+| FLAC | No | FFmpeg | `PCM_FLOAT` | Yes (x2^N round-trip) |
+| MP3, AAC, WAV | Either | FFmpeg | `PCM_FLOAT` | Yes (x2^N round-trip) |
+
+The `UsbAudioSink` handles both paths automatically in `handleBuffer()`:
+- `PCM_FLOAT` buffers are converted to `FloatArray` and enqueued via `enqueue()`
+- Non-float buffers (raw int from libFLAC) are enqueued as `ByteArray` via `enqueueRaw()`
+
+No app code is needed to distinguish the paths.
+
+**Note on `buildAudioRenderers()`:** You do NOT need to override `buildAudioRenderers()` or remove any renderers. When libFLAC is in the classpath, ExoPlayer's `FlacExtractor` decodes FLAC at the extractor level (before any renderer is consulted), so renderer selection is irrelevant for FLAC files.
+
 ### Step 5: Build the ExoPlayer
 
 ```kotlin
@@ -167,7 +201,7 @@ val player = ExoPlayer.Builder(this)
 
 ### Step 6: Set Track Bit Depth on Each Track Transition
 
-The sink needs to know the source file's bit depth so it can log and verify bit-perfect delivery. Set it **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
+The sink needs to know the source file's bit depth so it can select the correct USB alt setting and verify bit-perfect delivery. Set it **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
 
 ```kotlin
 player.addListener(object : Player.Listener {
@@ -188,7 +222,7 @@ player.addListener(object : Player.Listener {
 })
 ```
 
-**Why synchronous?** ExoPlayer calls `onMediaItemTransition` → then `configure()` on the sink. If `trackBitDepth` isn't set before `configure()` runs, the sink uses the previous track's bit depth for logging/verification.
+**Why synchronous?** ExoPlayer calls `onMediaItemTransition` then `configure()` on the sink. If `trackBitDepth` isn't set before `configure()` runs, the sink uses the previous track's bit depth for logging/verification.
 
 ### Step 7: Configuration Options (Optional)
 
@@ -207,9 +241,9 @@ val sink = UsbAudioSink(delegate, context, config)
 ### Complete Working Example
 
 See the Felicity Music Player integration in `driver/Felicity/`:
-- **`FelicityPlayerService.kt`** lines 178-260: `buildAudioSink()` with full processor chain, FFmpeg forcing, and UsbAudioSink creation
-- **`FelicityPlayerService.kt`** lines 835-855: `onMediaItemTransition()` with synchronous bit depth propagation via `runBlocking`
-- **`PreferenceFragment.kt`**: UI toggles that lock FFmpeg and Hi-Res when bit-perfect is active
+- **`FelicityPlayerService.kt`** `buildAudioSink()`: Full processor chain, libFLAC detection, conditional `enableFloatOutput`, and `UsbAudioSink` creation
+- **`FelicityPlayerService.kt`** `onMediaItemTransition()`: Synchronous bit depth propagation via `runBlocking(Dispatchers.IO)`
+- **`MainActivity.kt`** `handleUsbDeviceAttached()`: `UsbAudioPermissionHelper.handleIntent()` for USB device claiming
 
 ### Lifecycle Details
 
@@ -223,21 +257,29 @@ The `UsbAudioSink` manages the USB stream lifecycle automatically:
 | `flush()` | Clears the streaming queue (for seeks/discontinuities) |
 | `reset()` | USB stream **survives** — ExoPlayer calls reset() frequently on track changes, killing USB here causes audio to briefly route to speaker |
 | `release()` | Full cleanup: stop streaming thread, drain all URBs, release native resources |
-| Stale fd detected | setAlt(0) fails → auto close/reopen USB device with fresh fd |
+| Stale fd detected | setAlt(0) fails -> auto close/reopen USB device with fresh fd |
 
-### Why enableFloatOutput Matters
+### enableFloatOutput: When and Why
 
-With `enableFloatOutput = true`, the FFmpeg decoder delivers PCM as float32 for **all** sources:
+With `enableFloatOutput = true` (no libFLAC), the FFmpeg decoder delivers PCM as float32 for **all** sources:
 
 | Source File | Without Float | With Float |
 |-------------|--------------|------------|
-| 16-bit FLAC/MP3 | PCM_16BIT (correct) | PCM_FLOAT (16→float via ÷2^15, lossless) |
-| 24-bit FLAC | **PCM_16BIT (truncated!)** | PCM_FLOAT (24→float via ÷2^23, lossless) |
-| 32-bit WAV | **PCM_16BIT (truncated!)** | PCM_FLOAT (32→float, lossy — float32 has only 24-bit mantissa) |
+| 16-bit FLAC/MP3 | PCM_16BIT (correct) | PCM_FLOAT (16->float via /2^15, lossless) |
+| 24-bit FLAC | **PCM_16BIT (truncated!)** | PCM_FLOAT (24->float via /2^23, lossless) |
+| 32-bit WAV | **PCM_16BIT (truncated!)** | PCM_FLOAT (32->float, lossy -- float32 has only 24-bit mantissa) |
 
-**Without float output, 24-bit sources lose 8 bits of precision before reaching the USB driver.** This is the single most important setting for bit-perfect.
+**Without float output and without libFLAC, 24-bit sources lose 8 bits of precision before reaching the USB driver.**
 
-The reconversion in the native C++ driver uses `×2^N` scaling with clamping, which is the exact inverse of FFmpeg's `÷2^N` normalization. The round-trip is mathematically lossless for 16-bit and 24-bit sources.
+With `enableFloatOutput = false` AND libFLAC in classpath, FLAC files get raw integer PCM:
+
+| Source File | Decoder | Output | Float math? |
+|-------------|---------|--------|-------------|
+| 16-bit FLAC | libFLAC (FlacExtractor) | PCM_16BIT | None |
+| 24-bit FLAC | libFLAC (FlacExtractor) | PCM_32BIT (sign-extended) | None |
+| 24-bit MP3 | FFmpeg | PCM_FLOAT | Yes (lossless x2^N) |
+
+The reconversion in the native C++ driver uses `x2^N` scaling with clamping, which is the exact inverse of FFmpeg's `/2^N` normalization. The round-trip is mathematically lossless for 16-bit and 24-bit sources.
 
 ---
 
@@ -303,7 +345,7 @@ usbAudioDevice.setAltSetting(deviceInfo.bestAltSetting)
 Thread.sleep(50)
 ```
 
-**Why this exact sequence?** The xHCI host controller uses Configure Endpoint Commands to allocate/free isochronous transfer rings. Sending URBs on a stale ring corrupts the host controller state. xHCI ftrace analysis confirms this exact 7-step sequence with two setAlt(0) calls -- the second one after SET_CUR is critical for xHCI ring cleanup.
+**Why this exact sequence?** The xHCI host controller uses Configure Endpoint Commands to allocate/free isochronous transfer rings. Sending URBs on a stale ring corrupts the host controller state. xHCI ftrace analysis confirms this exact sequence with two setAlt(0) calls -- the second one after SET_CUR is critical for xHCI ring cleanup.
 
 ### Create and Start a Stream
 
@@ -327,7 +369,11 @@ stream.start()
 
 ### Write Audio Data
 
+Two write methods are available:
+
 ```kotlin
+// ── Float path (FFmpeg, or any source delivering float32 PCM) ──
+
 // Write interleaved float32 PCM [-1.0, 1.0].
 // The native layer converts to the target bit depth (int16/int24/int32)
 // and manages the 20-URB isochronous pipeline automatically.
@@ -337,10 +383,17 @@ val floatPcm = FloatArray(8192)  // 4096 stereo frames
 // ... fill with your audio data ...
 stream.write(floatPcm)
 
-// For continuous streaming, call write() in a loop. Each call blocks
-// for approximately the audio duration of the buffer (~85ms at 96kHz
-// for 8192 samples). This is the DAC's clock driving the pace.
+// ── Raw integer path (libFLAC, or any source delivering raw int PCM) ──
+
+// Write raw integer PCM bytes directly — zero float conversion.
+// The native layer pads to the DAC's bit depth using integer shift
+// operations (<< 8 or << 16). True bit-perfect by construction.
+val rawBytes = ByteArray(16384)  // raw PCM bytes
+// ... fill with your audio data ...
+stream.writeRaw(rawBytes, C.ENCODING_PCM_24BIT)  // or PCM_16BIT, PCM_32BIT
 ```
+
+For continuous streaming, call `write()` or `writeRaw()` in a loop. Each call blocks for approximately the audio duration of the buffer (~85ms at 96kHz for 8192 samples). This is the DAC's clock driving the pace.
 
 ### Stop and Release
 
@@ -360,7 +413,7 @@ stream.release()
 // Do NOT close the device connection between tracks!
 // Closing/reopening corrupts the xHCI endpoint state after ~3 cycles.
 // Keep the same UsbDeviceConnection and fd for the entire session.
-// Use setAlt(0) → SET_CUR → setAlt(N) to change rate on the same fd.
+// Use setAlt(0) -> SET_CUR -> setAlt(N) to change rate on the same fd.
 ```
 
 ### Stale Connection Detection
@@ -383,4 +436,4 @@ if (!usbAudioDevice.setAltSetting(0)) {
 - **Keep the device connection open** between tracks — close/reopen corrupts xHCI after ~3 cycles
 - **Use Java `setInterface()`** for alt setting changes — the native `USBDEVFS_SETINTERFACE` ioctl does NOT trigger the xHCI Configure Endpoint Command that properly allocates/frees ISO bandwidth
 - **Samsung S26 Ultra xHCI limit** — max ~20 URBs in flight (~256 TRBs ring capacity). Other devices (iBasso DX340, etc.) may support more
-- **Float conversion math** — if converting float→int yourself, use `×2^N` (not `×(2^N-1)`) to match FFmpeg's `÷2^N` normalization. Use `double` for 32-bit scaling since float32 can't represent 2^31 exactly
+- **Float conversion math** — if converting float->int yourself, use `x2^N` (not `x(2^N-1)`) to match FFmpeg's `/2^N` normalization. Use `double` for 32-bit scaling since float32 can't represent 2^31 exactly

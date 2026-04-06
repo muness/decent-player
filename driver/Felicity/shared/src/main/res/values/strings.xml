@@ -173,7 +173,11 @@
     <string name="system_hardware">System Hardware</string>
     <string name="audio_pipeline">Audio Pipeline</string>
     <string name="playback">Playback</string>
-    <string name="audio_pipeline_summary">Select the primary engine used to process audio data.</string>
+    <string name="audio_pipeline_summary">Audio decode engine</string>
+    <string name="flac_decoder">FLAC Decoder</string>
+    <string name="flac_decoder_summary">Select the decoder used for FLAC files when bit-perfect is active.</string>
+    <string name="libflac_bitperfect">libFLAC (bit-perfect)</string>
+    <string name="ffmpeg_float">FFmpeg (float)</string>
     <string name="are_you_sure">Are you sure?</string>
     <string name="yes">Yes</string>
     <string name="delete_audio_summary">%1$s will be permanently deleted from storage.</string>

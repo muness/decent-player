@@ -16,20 +16,28 @@ Every other app accepts this. We didn't.
 
 ---
 
-## Libraries
+## Decent USB Audio Libraries
 
-Two standalone libraries that any Android app can use:
+Three standalone libraries that any Android app can use:
 
 ### `com.decent:usb-audio-driver`
-Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, and float-to-integer conversion with bit-perfect math.
+Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, and both float-to-integer and raw integer-to-integer conversion with bit-perfect math.
 
 ### `com.decent:usb-audio-wrapper-media3`
-Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, and xHCI-verified transition sequences. Five lines to integrate.
+Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, xHCI-verified transition sequences, and dual-path buffer handling (float from FFmpeg, raw int from libFLAC). Integrates in a few lines.
+
+### `com.decent:media3-decoder-flac`
+Optional native FLAC decoder built from xiph/flac source. When in the classpath, ExoPlayer automatically decodes FLAC files to raw integer PCM at the extractor level — zero float math in the entire pipeline. Non-FLAC formats use the FFmpeg extension if present.
 
 ```kotlin
-// That's it. Bit-perfect USB audio in your Media3 app.
+// Bit-perfect USB audio in your Media3 app.
+val hasLibFlac = try {
+    Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
+    true
+} catch (_: ClassNotFoundException) { false }
+
 val delegate = DefaultAudioSink.Builder(context)
-    .setEnableFloatOutput(true)
+    .setEnableFloatOutput(!hasLibFlac)  // raw int with libFLAC, float without
     .build()
 return UsbAudioSink(delegate, context)
 ```
@@ -47,7 +55,7 @@ See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start gui
 - Works on **stock Android 10+**, no root required
 - Pipeline of 20 isochronous URBs with dedicated streaming thread for glitch-free output
 - Protocol-matched rate transition sequence (from xHCI ftrace analysis)
-- Bit-perfect float-to-integer conversion (x2^N scaling, mathematically lossless for 16/24-bit)
+- **Two bit-perfect paths**: float round-trip (x2^N, all formats via FFmpeg) and zero-float integer (libFLAC, FLAC only)
 
 ### Verified
 
@@ -65,6 +73,7 @@ AudioFlinger output:    SPEAKER only (not USB)
 Qualcomm PAL:           zero USB activity
 CLOCK_VALID:            true (DAC confirms clock locked)
 Float conversion:       x2^N round-trip (exact for 16/24-bit)
+Raw int path:           zero float, integer shift only (libFLAC)
 URB pipeline:           20 in-flight, zero drops, zero timeouts
 Streaming thread:       dedicated, decoupled from ExoPlayer
 ```
@@ -84,7 +93,7 @@ Before this, bit-perfect USB audio on Android was not available as open-source. 
 **The driver and libraries work. The player is a proof-of-concept.**
 
 This repo contains:
-- Two standalone libraries (`libs/`) ready for integration in any Media3 app
+- Three standalone libraries (`libs/`) ready for integration in any Media3 app
 - Complete technical documentation of the USB audio driver and libraries
 - Investigation notes, USB protocol analysis, xHCI ftrace analysis
 - Proof-of-concept integration inside a Felicity Music Player fork (`driver/Felicity/`)
@@ -97,9 +106,11 @@ This repo contains:
 
 | Document | What's inside |
 |----------|---------------|
-| [Getting Started](docs/libs/GETTING_STARTED.md) | Quick-start guide, 5-line integration example |
+| [Getting Started](docs/libs/GETTING_STARTED.md) | Quick-start guide with integration examples |
 | [Integration Guide](docs/libs/INTEGRATION_GUIDE.md) | Full setup for Media3 apps and standalone driver usage |
 | [Architecture](docs/libs/ARCHITECTURE.md) | Pipeline diagram, thread model, rate transitions, bit-perfect math |
+| [FLAC Decoders](docs/libs/FLAC_DECODERS.md) | libFLAC vs FFmpeg comparison, integration details |
+| [FLAC Build Instructions](docs/libs/DECODER_FLAC_BUILD.md) | How to build the native FLAC decoder from source |
 
 ### Driver investigation docs (deep technical reference)
 

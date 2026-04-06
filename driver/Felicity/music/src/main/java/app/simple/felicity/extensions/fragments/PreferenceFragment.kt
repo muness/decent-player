@@ -529,7 +529,10 @@ abstract class PreferenceFragment : MediaFragment() {
                 type = PreferenceType.POPUP,
                 valueProvider = {
                     if (bitPerfectActive) {
-                        getString(R.string.ffmpeg) + " (bit-perfect)"
+                        val hasFlac = try {
+                            Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer"); true
+                        } catch (_: ClassNotFoundException) { false }
+                        if (hasFlac) "libFLAC + FFmpeg" else "FFmpeg"
                     } else when (AudioPreferences.getAudioDecoder()) {
                         AudioPreferences.LOCAL_DECODER -> getString(R.string.system_hardware)
                         AudioPreferences.FFMPEG -> getString(R.string.ffmpeg)

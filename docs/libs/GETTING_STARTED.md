@@ -1,4 +1,4 @@
-# Getting Started
+# Getting Started with Decent USB Audio
 
 Bit-perfect USB audio output for Android, bypassing the entire Android audio stack (AudioFlinger, AudioTrack, AAudio). Audio goes directly from your app to the USB DAC via Linux usbdevfs isochronous transfers.
 
@@ -8,6 +8,7 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 - **Automatic sample rate switching** — DAC switches to match the source file (44.1kHz, 48kHz, 96kHz, 192kHz, etc.)
 - **Automatic bit depth handling** — 16-bit and 24-bit sources are zero-padded to the DAC's native format
 - **Seamless track transitions** — xHCI-verified transition sequence for reliable rate changes
+- **Two bit-perfect paths** — float round-trip (FFmpeg, all formats) and zero-float integer (libFLAC, FLAC only)
 - **Works with any USB Audio Class 2.0 DAC**
 
 ## Requirements
@@ -15,13 +16,13 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 - Android 10+ (API 29+)
 - USB Audio Class 2.0 DAC (e.g., Cayin RU7, iFi GO, Questyle M15, etc.)
 - App must use AndroidX Media3 / ExoPlayer for audio playback
-- FFmpeg decoder recommended for hi-res FLAC (e.g., `org.jellyfin.media3:media3-ffmpeg-decoder`)
+- FFmpeg decoder for hi-res and non-FLAC formats (e.g., `org.jellyfin.media3:media3-ffmpeg-decoder`)
 
 ## Installation
 
 ### Gradle Dependencies
 
-Add both libraries to your app module:
+Add the libraries to your app module:
 
 ```gradle
 dependencies {
@@ -30,6 +31,16 @@ dependencies {
     
     // ExoPlayer/Media3 AudioSink wrapper
     implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
+    
+    // Optional: Native FLAC decoder (zero-float integer path for FLAC files)
+    // When present, FLAC is decoded to raw int PCM at the extractor level.
+    // When absent, the FFmpeg extension handles FLAC via float (also bit-perfect).
+    implementation 'com.decent:media3-decoder-flac:1.0.0'
+    
+    // FFmpeg decoder extension — NOT built into Media3. Required for non-FLAC
+    // formats (MP3, AAC, etc.) and for FLAC when libFLAC is not present.
+    // The Android built-in MediaCodec decoder truncates 24-bit to 16-bit.
+    implementation 'org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1'
 }
 ```
 
@@ -66,7 +77,7 @@ Create `res/xml/usb_audio_device_filter.xml`:
 </resources>
 ```
 
-## Quick Integration (5 Lines)
+## Quick Integration
 
 In your `DefaultRenderersFactory.buildAudioSink()` override:
 
@@ -78,15 +89,28 @@ override fun buildAudioSink(
     enableFloatOutput: Boolean,
     enableOffload: Boolean
 ): AudioSink {
+    // Detect libFLAC at runtime — if present, FLAC is decoded to raw int
+    // at the extractor level (zero float). Non-FLAC formats use the FFmpeg extension (Jellyfin) if present, or the Android built-in MediaCodec decoder.
+    val hasLibFlac = try {
+        Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
+        true
+    } catch (_: ClassNotFoundException) { false }
+    
     val delegate = DefaultAudioSink.Builder(context)
-        .setEnableFloatOutput(true)  // Required for 24-bit precision
+        .setEnableFloatOutput(!hasLibFlac)  // false with libFLAC (raw int), true without (float)
         .build()
     
     return UsbAudioSink(delegate, context).also { usbSink = it }
 }
 ```
 
-You also need to force FFmpeg decoder and set `EXTENSION_RENDERER_MODE_PREFER` on your `DefaultRenderersFactory`. Without FFmpeg, the Android built-in decoder truncates 24-bit sources to 16-bit.
+**Why the conditional `enableFloatOutput`?**
+- With libFLAC: `enableFloatOutput=false` so libFLAC delivers raw integer PCM for FLAC files. The `UsbAudioSink` sends these bytes directly to the DAC via integer shift operations — zero float math in the entire pipeline.
+- Without libFLAC: `enableFloatOutput=true` so FFmpeg delivers float32 for all formats. The native driver reconverts via `x2^N` scaling — mathematically lossless for 16-bit and 24-bit.
+
+The `UsbAudioSink` handles both paths automatically in `handleBuffer()` — it detects the PCM encoding and routes to either `enqueue(FloatArray)` or `enqueueRaw(ByteArray)`.
+
+You also need to set `EXTENSION_RENDERER_MODE_PREFER` on your `DefaultRenderersFactory` to force FFmpeg for non-FLAC formats. Without FFmpeg, the Android built-in decoder truncates 24-bit sources to 16-bit.
 
 See the [Integration Guide](INTEGRATION_GUIDE.md) for the complete step-by-step with all details (RenderersFactory setup, track bit depth propagation, stale fd handling, lifecycle, etc.).
 
@@ -115,6 +139,24 @@ player.addListener(object : Player.Listener {
 })
 ```
 
+## Handle USB Device Attach
+
+In your Activity, handle the `USB_DEVICE_ATTACHED` intent so the device is claimed before the kernel driver binds:
+
+```kotlin
+import com.decent.usbaudio.UsbAudioPermissionHelper
+
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    UsbAudioPermissionHelper.handleIntent(applicationContext, intent)
+}
+
+override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    UsbAudioPermissionHelper.handleIntent(applicationContext, intent)
+}
+```
+
 ## Sample App
 
 The Felicity music player in `driver/Felicity/` is a complete working example. See `FelicityPlayerService.kt` for the full integration.
@@ -123,3 +165,5 @@ The Felicity music player in `driver/Felicity/` is a complete working example. S
 
 - [Integration Guide](INTEGRATION_GUIDE.md) — detailed setup with all configuration options
 - [Architecture](ARCHITECTURE.md) — how the pipeline works under the hood
+- [FLAC Decoders](FLAC_DECODERS.md) — libFLAC vs FFmpeg comparison and integration details
+- [FLAC Build Instructions](DECODER_FLAC_BUILD.md) — how to build the libFLAC decoder from source
