@@ -34,6 +34,8 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
 
     @Volatile
     private var running = false
+    @Volatile
+    private var paused = false
     private var thread: Thread? = null
     private var dropCount = 0
 
@@ -42,10 +44,21 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
         thread = Thread({
             Log.i(TAG, "USB streaming thread started")
             while (running) {
+                if (paused) {
+                    Thread.sleep(50)
+                    continue
+                }
+                val qBefore = audioQueue.size
                 when (val buf = audioQueue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                    is AudioBuffer.FloatBuffer -> usbStream.write(buf.data)
-                    is AudioBuffer.RawBuffer -> usbStream.writeRaw(buf.data, buf.encoding)
-                    null -> {}
+                    is AudioBuffer.FloatBuffer -> {
+                        usbStream.write(buf.data)
+                        if (qBefore <= 1) Log.w(TAG, "Queue nearly empty: $qBefore before write")
+                    }
+                    is AudioBuffer.RawBuffer -> {
+                        usbStream.writeRaw(buf.data, buf.encoding)
+                        if (qBefore <= 1) Log.w(TAG, "Queue nearly empty: $qBefore before writeRaw")
+                    }
+                    null -> Log.w(TAG, "Queue EMPTY — poll timeout")
                 }
             }
             Log.i(TAG, "USB streaming thread exited")
@@ -81,7 +94,12 @@ class UsbStreamingThread(private val usbStream: UsbAudioStream) {
         }
     }
 
+    fun pauseStreaming() { paused = true }
+    fun resumeStreaming() { paused = false }
+
     fun hasPendingData(): Boolean = !audioQueue.isEmpty()
+
+    fun queueSize(): Int = audioQueue.size
 
     fun flush() {
         audioQueue.clear()

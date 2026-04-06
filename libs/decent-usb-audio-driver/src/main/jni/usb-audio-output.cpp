@@ -146,39 +146,6 @@ static double readFeedback(int fd, int ep) {
     return r;
 }
 
-// ── Diagnostics (globals, must be before reap loop) ─────────────────
-
-static int64_t g_urbErrorCount = 0;
-static int32_t g_lastSampleL = 0, g_lastSampleR = 0;
-static bool g_boundaryInitialized = false;
-static int64_t g_boundaryBreakCount = 0;
-
-static void checkWriteBoundary(const uint8_t *data, int totalBytes, int bytesPerFrame, int ch) {
-    if (bytesPerFrame != ch * 4 || totalBytes < bytesPerFrame) return;
-    auto *samples = reinterpret_cast<const int32_t *>(data);
-    int totalFrames = totalBytes / bytesPerFrame;
-    int32_t firstL = samples[0];
-    int32_t firstR = (ch > 1) ? samples[1] : firstL;
-    int32_t lastL = samples[(totalFrames - 1) * ch];
-    int32_t lastR = (ch > 1) ? samples[(totalFrames - 1) * ch + 1] : lastL;
-    if (g_boundaryInitialized) {
-        int64_t deltaL = (int64_t)firstL - (int64_t)g_lastSampleL;
-        int64_t deltaR = (int64_t)firstR - (int64_t)g_lastSampleR;
-        if (deltaL < 0) deltaL = -deltaL;
-        if (deltaR < 0) deltaR = -deltaR;
-        if (deltaL > 1073741824LL || deltaR > 1073741824LL) {
-            g_boundaryBreakCount++;
-            LOGW("BOUNDARY_BREAK #%lld: prevL=%d→%d (Δ%lld) prevR=%d→%d (Δ%lld)",
-                 (long long)g_boundaryBreakCount,
-                 g_lastSampleL, firstL, (long long)deltaL,
-                 g_lastSampleR, firstR, (long long)deltaR);
-        }
-    }
-    g_boundaryInitialized = true;
-    g_lastSampleL = lastL;
-    g_lastSampleR = lastR;
-}
-
 // ── Continuous feedback ─────────────────────────────────────────────
 
 /**
@@ -318,25 +285,7 @@ static int reapOldestUrb(UsbAudioContext *ctx, int timeoutMs) {
                 c = nullptr;  // retry — we need an audio URB
                 continue;
             }
-            // Audio URB reaped — check ISO packet status for errors
-            {
-                int errPkts = 0;
-                int shortPkts = 0;
-                for (int p = 0; p < c->number_of_packets; p++) {
-                    int st = c->iso_frame_desc[p].status;
-                    int actual = c->iso_frame_desc[p].actual_length;
-                    int expected = c->iso_frame_desc[p].length;
-                    if (st != 0) errPkts++;
-                    if (actual != expected && actual != 0) shortPkts++;
-                }
-                if (errPkts > 0 || shortPkts > 0) {
-                    g_urbErrorCount++;
-                    if (g_urbErrorCount <= 20 || g_urbErrorCount % 100 == 0) {
-                        LOGW("URB_ERR #%lld slot=%d: %d err_pkts, %d short_pkts, status=%d",
-                             (long long)g_urbErrorCount, ctx->reapIdx, errPkts, shortPkts, c->status);
-                    }
-                }
-            }
+            // Audio URB reaped successfully
             ctx->reapIdx = (ctx->reapIdx + 1) % USB_AUDIO_NUM_URBS;
             ctx->urbsInFlight--;
             return 0;
@@ -592,9 +541,6 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWrite(
     }
     env->ReleaseFloatArrayElements(pcm, f, JNI_ABORT);
 
-    // Diagnostic: check for boundary discontinuity between write calls
-    checkWriteBoundary(ctx->transferBuffer, totalBytes, ctx->bytesPerFrame, ctx->channelCount);
-
     // Submit converted PCM to USB pipeline (shared with raw path)
     submitPcmToUrbs(ctx, ctx->transferBuffer, totalBytes);
 
@@ -634,7 +580,8 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeFlush(
     if (!ctx) return;
     ctx->frameAccumulator = 0.0;
     ctx->residualBytes = 0;
-    LOGI("Flush: frameAccumulator and residual reset");
+    ctx->framesWritten = 0;
+    LOGI("Flush: frameAccumulator, residual, and framesWritten reset");
 }
 
 JNIEXPORT jint JNICALL
@@ -876,9 +823,6 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
     }
 
     env->ReleaseByteArrayElements(pcm, rawData, JNI_ABORT);
-
-    // Diagnostic: check for boundary discontinuity between write calls
-    checkWriteBoundary(ctx->transferBuffer, outputBytes, ctx->bytesPerFrame, ctx->channelCount);
 
     // Submit to USB pipeline
     submitPcmToUrbs(ctx, ctx->transferBuffer, outputBytes);

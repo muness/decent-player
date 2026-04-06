@@ -8,6 +8,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import com.decent.usbaudio.UsbAudioDevice
@@ -48,8 +49,20 @@ class UsbAudioSink(
     private var currentChannelCount: Int = 0
     private var pendingVolume: Float = 1f
     private var delegateMuted: Boolean = false
-    private var usbWritePendingForCurrentBuffer: Boolean = true
     private var handleBufferCallCount: Long = 0
+
+    /**
+     * Media timeline offset captured from the first buffer's presentationTimeUs
+     * after each flush/init. Maps framesWritten=0 to the correct song position.
+     * DefaultAudioSink calls this startMediaTimeUs internally.
+     */
+    private var usbStartMediaTimeUs: Long = 0L
+    private var usbStartMediaTimeNeedsInit: Boolean = true
+    private var handledEndOfStream: Boolean = false
+
+    /** Max queue entries before returning false for backpressure (paces ExoPlayer).
+     *  Pause responsiveness is handled by pauseStreaming(), not queue size. */
+    private val QUEUE_BACKPRESSURE_THRESHOLD = 16
 
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
@@ -94,44 +107,104 @@ class UsbAudioSink(
         val stream = usbAudioStream
         if (config.bitPerfectEnabled && stream?.isAlive == true) {
             muteDelegateIfNeeded()
-            val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
 
-            val thread = usbStreamingThread
-            if (thread != null && usbWritePendingForCurrentBuffer) {
-                handleBufferCallCount++
+            val thread = usbStreamingThread ?: return true
 
-                if (currentEncoding == C.ENCODING_PCM_FLOAT) {
-                    val totalSamples = snapshot.remaining() / 4
-                    if (totalSamples > 0) {
-                        val floatBuf = FloatArray(totalSamples)
-                        snapshot.asFloatBuffer().get(floatBuf)
-                        if (handleBufferCallCount <= 3) {
-                            Log.i(TAG, "handleBuffer #$handleBufferCallCount: FLOAT samples=$totalSamples")
-                        }
-                        thread.enqueue(floatBuf)
-                    }
-                } else {
-                    val remaining = snapshot.remaining()
-                    if (remaining > 0) {
-                        val rawBytes = ByteArray(remaining)
-                        snapshot.get(rawBytes)
-                        if (handleBufferCallCount <= 3) {
-                            val bps = PcmUtils.bytesPerSample(currentEncoding)
-                            Log.i(TAG, "handleBuffer #$handleBufferCallCount: RAW ${bps*8}bit bytes=$remaining")
-                        }
-                        thread.enqueueRaw(rawBytes, currentEncoding)
-                    }
-                }
-                usbWritePendingForCurrentBuffer = false
+            // Backpressure: if queue is nearly full, tell ExoPlayer to retry later.
+            // This paces the renderer to the USB DAC's consumption rate without
+            // depending on the delegate AudioTrack.
+            if (thread.queueSize() >= QUEUE_BACKPRESSURE_THRESHOLD) {
+                return false
             }
 
-            val consumed = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-            if (consumed) usbWritePendingForCurrentBuffer = true
-            return consumed
+            // Capture media timeline offset from the first buffer after flush/init.
+            // This maps framesWritten=0 → correct position in the song.
+            if (usbStartMediaTimeNeedsInit) {
+                usbStartMediaTimeUs = maxOf(0L, presentationTimeUs)
+                usbStartMediaTimeNeedsInit = false
+                Log.i(TAG, "startMediaTimeUs=$usbStartMediaTimeUs (${usbStartMediaTimeUs / 1_000_000}s)")
+            }
+
+            handleBufferCallCount++
+            val snapshot: ByteBuffer = buffer.slice().order(buffer.order())
+
+            if (currentEncoding == C.ENCODING_PCM_FLOAT) {
+                val totalSamples = snapshot.remaining() / 4
+                if (totalSamples > 0) {
+                    val floatBuf = FloatArray(totalSamples)
+                    snapshot.asFloatBuffer().get(floatBuf)
+                    if (handleBufferCallCount <= 3) {
+                        Log.i(TAG, "handleBuffer #$handleBufferCallCount: FLOAT samples=$totalSamples")
+                    }
+                    thread.enqueue(floatBuf)
+                }
+            } else {
+                val remaining = snapshot.remaining()
+                if (remaining > 0) {
+                    val rawBytes = ByteArray(remaining)
+                    snapshot.get(rawBytes)
+                    if (handleBufferCallCount <= 3) {
+                        val bps = PcmUtils.bytesPerSample(currentEncoding)
+                        Log.i(TAG, "handleBuffer #$handleBufferCallCount: RAW ${bps*8}bit bytes=$remaining")
+                    }
+                    thread.enqueueRaw(rawBytes, currentEncoding)
+                }
+            }
+
+            // Advance buffer and return true — no delegate dependency.
+            buffer.position(buffer.limit())
+            return true
         }
 
         unmuteDelegateIfNeeded()
         return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+    }
+
+    // ── Position tracking via USB framesWritten ────────────────────────
+
+    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+        if (config.bitPerfectEnabled && usbAudioStream?.isAlive == true) {
+            if (usbStartMediaTimeNeedsInit) return AudioSink.CURRENT_POSITION_NOT_SET
+            val frames = usbAudioStream?.framesWritten ?: 0L
+            return if (currentSampleRate > 0) {
+                usbStartMediaTimeUs + frames * C.MICROS_PER_SECOND / currentSampleRate
+            } else AudioSink.CURRENT_POSITION_NOT_SET
+        }
+        return super.getCurrentPositionUs(sourceEnded)
+    }
+
+    override fun isEnded(): Boolean {
+        if (config.bitPerfectEnabled && usbAudioStream?.isAlive == true) {
+            return handledEndOfStream && usbStreamingThread?.hasPendingData() != true
+        }
+        return super.isEnded()
+    }
+
+    override fun hasPendingData(): Boolean {
+        if (config.bitPerfectEnabled && usbAudioStream?.isAlive == true) {
+            return usbStreamingThread?.hasPendingData() == true
+        }
+        return super.hasPendingData()
+    }
+
+    override fun playToEndOfStream() {
+        if (config.bitPerfectEnabled && usbAudioStream?.isAlive == true) {
+            handledEndOfStream = true
+            return
+        }
+        super.playToEndOfStream()
+    }
+
+    override fun play() {
+        super.play()
+        usbStreamingThread?.resumeStreaming()
+    }
+
+    override fun pause() {
+        if (config.bitPerfectEnabled && usbAudioStream?.isAlive == true) {
+            usbStreamingThread?.pauseStreaming()
+        }
+        super.pause()
     }
 
     override fun setVolume(volume: Float) {
@@ -146,7 +219,9 @@ class UsbAudioSink(
     override fun flush() {
         super.flush()
         usbStreamingThread?.flush()
-        usbAudioStream?.flush()
+        usbAudioStream?.flush()  // resets frameAccumulator, residual, AND framesWritten
+        usbStartMediaTimeNeedsInit = true
+        handledEndOfStream = false
     }
 
     override fun reset() {
