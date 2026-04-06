@@ -44,7 +44,10 @@ class UsbAudioStream(
         maxPacketSize: Int
 ) {
 
-    private var nativeHandle: Long = 0L
+    /** Native UsbAudioContext pointer. Exposed for NativeAudioEngine which
+     *  shares the same USB context for direct submitPcmToUrbs calls. */
+    var nativeHandle: Long = 0L
+        private set
 
     init {
         nativeHandle = nativeUsbAudioCreate(

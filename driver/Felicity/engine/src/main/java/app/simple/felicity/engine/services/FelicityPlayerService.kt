@@ -861,11 +861,20 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 // The UsbAudioSink uses this to select the optimal USB alt setting.
                 val usbSink = currentUsbSink
                 if (usbSink != null) {
+                    var engineFinished = false
                     runBlocking(Dispatchers.IO) {
                         val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
+                        engineFinished = usbSink.cleanupFinishedEngine()
                         usbSink.trackBitDepth = audio.bitPerSample.toInt()
+                        usbSink.currentTrackPath = audio.path
                         AudioPreferences.setCurrentTrackBitDepth(audio.bitPerSample.toInt())
-                        Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}")
+                        Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}, path=${audio.path}")
+                    }
+                    // Only force restart if the engine actually finished (auto-transition).
+                    // Don't seekTo(0) if the engine is still playing (ExoPlayer pre-buffer).
+                    if (engineFinished) {
+                        player.seekTo(0)
+                        Log.i(TAG, "Engine finished — forced seekTo(0) for next track")
                     }
                 }
 

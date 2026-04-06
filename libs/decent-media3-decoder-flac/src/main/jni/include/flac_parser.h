@@ -87,6 +87,10 @@ class FLACParser {
 
   bool getSeekPositions(int64_t timeUs, std::array<int64_t, 4> &result);
 
+  /** Seek to an absolute sample position using libFLAC's binary search.
+   *  Works with or without a seek table. */
+  bool seekAbsolute(FLAC__uint64 sample);
+
   void flush() {
     reset(mCurrentPos);
   }

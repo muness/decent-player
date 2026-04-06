@@ -138,6 +138,15 @@ FLAC__StreamDecoderTellStatus FLACParser::tellCallback(
 
 FLAC__StreamDecoderLengthStatus FLACParser::lengthCallback(
     FLAC__uint64* stream_length) {
+  off64_t length = mDataSource->getLength();
+  if (length >= 0) {
+    *stream_length = (FLAC__uint64)length;
+    __android_log_print(ANDROID_LOG_DEBUG, "FLACParser",
+        "lengthCallback: %lld bytes", (long long)length);
+    return FLAC__STREAM_DECODER_LENGTH_STATUS_OK;
+  }
+  __android_log_print(ANDROID_LOG_WARN, "FLACParser",
+      "lengthCallback: UNSUPPORTED (getLength=%lld)", (long long)length);
   return FLAC__STREAM_DECODER_LENGTH_STATUS_UNSUPPORTED;
 }
 
@@ -217,6 +226,18 @@ void FLACParser::metadataCallback(const FLAC__StreamMetadata* metadata) {
 void FLACParser::errorCallback(FLAC__StreamDecoderErrorStatus status) {
   ALOGE("FLACParser::errorCallback status=%d", status);
   mErrorStatus = status;
+}
+
+bool FLACParser::seekAbsolute(FLAC__uint64 sample) {
+  if (mDecoder == NULL) return false;
+  mEOF = false;
+  // Allow writeCallback to accept frames during seek's internal decode.
+  // Without this, writeCallback returns ABORT (it requires mWriteRequested).
+  mWriteRequested = true;
+  bool result = FLAC__stream_decoder_seek_absolute(mDecoder, sample);
+  mWriteRequested = false;
+  mWriteCompleted = false;
+  return result;
 }
 
 // Copy samples from FLAC native 32-bit non-interleaved to

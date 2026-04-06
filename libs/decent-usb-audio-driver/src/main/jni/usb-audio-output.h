@@ -130,3 +130,20 @@ struct UsbAudioContext {
     uint8_t feedbackBuffer[4];
     bool feedbackInFlight;
 };
+
+// ── Functions accessible from native-audio-engine ──────────────────
+
+/**
+ * Submit PCM data (already in the target bit depth) to the USB pipeline.
+ * Blocks when the URB ring is full (natural backpressure from DAC clock).
+ */
+void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes);
+
+/** 16-bit → 32-bit: shift left 16. */
+void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples);
+
+/** 24-bit packed (3 bytes/sample) → 32-bit: sign-extend + shift left 8. */
+void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples);
+
+/** int32 (24-bit sign-extended from libFLAC) → 32-bit: shift left 8. */
+void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples);

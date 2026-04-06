@@ -388,8 +388,8 @@ static int drainAllUrbs(UsbAudioContext *ctx) {
 
 // ── JNI entry points ────────────────────────────────────────────────
 
-// Forward declaration (defined after integer padding functions)
-static void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes);
+// Forward declaration (defined after integer padding functions, non-static for native-audio-engine)
+void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes);
 
 extern "C" {
 
@@ -645,24 +645,26 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbReset(
     return 0;
 }
 
+} // extern "C" — pause for non-JNI functions used by native-audio-engine
+
 // ── Integer padding (lossless, zero float) ──────────────────────────
 
 // 16-bit → 32-bit: shift left 16
-static void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
+void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in16 = reinterpret_cast<const int16_t *>(src);
     for (int i = 0; i < numSamples; i++) out[i] = (int32_t)in16[i] << 16;
 }
 
 // int32 (24-bit sign-extended from libFLAC) → 32-bit: shift left 8
-static void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples) {
+void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in32 = reinterpret_cast<const int32_t *>(src);
     for (int i = 0; i < numSamples; i++) out[i] = in32[i] << 8;
 }
 
 // 24-bit packed (3 bytes/sample) → 32-bit: read 3 bytes, sign-extend, shift left 8
-static void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
+void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     for (int i = 0; i < numSamples; i++) {
         int32_t s = src[i*3] | (src[i*3+1] << 8) | (src[i*3+2] << 16);
@@ -677,7 +679,7 @@ static void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
  * Submit PCM data (already in the target bit depth) to the USB pipeline.
  * Used by both nativeUsbAudioWrite (float path) and nativeUsbAudioWriteRaw.
  */
-static void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes) {
+void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalBytes) {
     // Prepend any residual bytes from the previous call to avoid
     // micro-discontinuities (pops) at buffer boundaries.
     const uint8_t *data = pcmData;
@@ -779,6 +781,8 @@ static void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int to
 }
 
 // ── Raw bytes write (no float, for libFLAC integer path) ────────────
+
+extern "C" {  // resume JNI functions
 
 JNIEXPORT void JNICALL
 Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioWriteRaw(
