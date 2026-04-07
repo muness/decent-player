@@ -55,7 +55,7 @@ See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start gui
 - Auto-detects **Clock Source ID** and **optimal bit depth** from USB descriptors
 - Supports any sample rate the DAC advertises (44.1kHz — 384kHz)
 - Works on **stock Android 10+**, no root required
-- Pipeline of 20 isochronous URBs with dedicated streaming thread for glitch-free output
+- Pipeline of 80 isochronous URBs (~80ms buffer) with dedicated streaming thread for glitch-free output
 - Protocol-matched rate transition sequence (from xHCI ftrace analysis)
 - **Three bit-perfect paths**: native C++ engine (FLAC, zero JNI), float round-trip (x2^N, all formats via FFmpeg), and zero-float integer (libFLAC extractor)
 - **NativeAudioEngine**: single C++ thread does FLAC decode → bit-depth conversion → USB output with ~10x headroom even on weak CPUs
@@ -78,7 +78,7 @@ CLOCK_VALID:            true (DAC confirms clock locked)
 NativeAudioEngine:      FLAC decode → USB in single C++ thread (zero JNI)
 Float conversion:       x2^N round-trip (exact for 16/24-bit)
 Raw int path:           zero float, integer shift only (libFLAC)
-URB pipeline:           20 in-flight, zero drops, zero timeouts
+URB pipeline:           80 in-flight, zero drops, zero timeouts
 SD card I/O:            18 MB / 30s (vs 1,390 MB before optimization)
 ```
 

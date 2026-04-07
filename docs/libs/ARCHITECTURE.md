@@ -44,7 +44,7 @@ ExoPlayer Render Thread
 |  2. Build ISO packets (8 per URB)           |
 |  3. Submit to pre-allocated ring buffer     |
 |  4. Reap completed URBs (FIFO order)        |
-|  5. 20 URBs in flight = ~20ms pipeline      |
+|  5. 80 URBs in flight = ~80ms pipeline      |
 +----------------+----------------------------+
                  | ioctl(USBDEVFS_SUBMITURB)
                  v
@@ -102,7 +102,7 @@ ExoPlayer Render Thread
 |     (e.g., 24-bit << 8 -> 32-bit)          |
 |  2. Build ISO packets (8 per URB)           |
 |  3. Submit to pre-allocated ring buffer     |
-|  4. 20 URBs in flight = ~20ms pipeline      |
+|  4. 80 URBs in flight = ~80ms pipeline      |
 +----------------+----------------------------+
                  | ioctl(USBDEVFS_SUBMITURB)
                  v
@@ -267,19 +267,11 @@ Matches the exact behavior observed via xHCI ftrace analysis on iBasso DX340:
 
 Steps 3, 6, and 7 MUST use Java `UsbDeviceConnection.setInterface()` -- the native `USBDEVFS_SETINTERFACE` ioctl does not trigger the xHCI Configure Endpoint Command properly.
 
-## Samsung xHCI Ring Limitations
+## URB Pipeline Configuration
 
-The Samsung S26 Ultra (Exynos) allocates ISO endpoint rings with ~256 TRB capacity. Each URB with 8 ISO packets uses ~10 TRBs (8 packets + overhead). This limits the pipeline to ~20 URBs (the current `USB_AUDIO_NUM_URBS` value).
+The driver uses a ring buffer of **80 URBs** (`USB_AUDIO_NUM_URBS = 80`), each carrying 8 ISO packets. This provides ~80ms of buffered audio in the USB pipeline — enough headroom for any scheduling jitter.
 
-| URBs | TRBs | Buffer | Status |
-|------|------|--------|--------|
-| 16 | ~160 | 16ms | Works (glitchy) |
-| 20 | ~200 | 20ms | Works (stable) |
-| 24 | ~240 | 24ms | Marginal |
-| 32 | ~320 | 32ms | Fails (ring overflow) |
-| 64 | ~640 | 64ms | Fails |
-
-Other devices (e.g., iBasso DX340 with Qualcomm/Rockchip SoC) may support larger rings.
+Both tested devices (Samsung S26 Ultra and iBasso DX340) handle 80 URBs without issues. Earlier investigations suggested Samsung's xHCI ring had a ~256 TRB limit (~20 URBs), but this was disproven — 80 URBs (requiring ~800 TRBs) work stable on the S26 Ultra.
 
 ## Bit-Perfect Math
 

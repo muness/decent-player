@@ -401,7 +401,7 @@ Two write methods are available:
 
 // Write interleaved float32 PCM [-1.0, 1.0].
 // The native layer converts to the target bit depth (int16/int24/int32)
-// and manages the 20-URB isochronous pipeline automatically.
+// and manages the 80-URB isochronous pipeline automatically.
 // This call BLOCKS when the pipeline is full — natural backpressure
 // matching the DAC's hardware clock rate.
 val floatPcm = FloatArray(8192)  // 4096 stereo frames
@@ -460,5 +460,5 @@ if (!usbAudioDevice.setAltSetting(0)) {
 - **Always drain URBs before setAlt(0)** — pending URBs corrupt the xHCI host controller state
 - **Keep the device connection open** between tracks — close/reopen corrupts xHCI after ~3 cycles
 - **Use Java `setInterface()`** for alt setting changes — the native `USBDEVFS_SETINTERFACE` ioctl does NOT trigger the xHCI Configure Endpoint Command that properly allocates/frees ISO bandwidth
-- **Samsung S26 Ultra xHCI limit** — max ~20 URBs in flight (~256 TRBs ring capacity). Other devices (iBasso DX340, etc.) may support more
+- **URB pipeline** — 80 URBs in flight (~80ms buffer). Both Samsung S26 Ultra and iBasso DX340 handle this without issues
 - **Float conversion math** — if converting float->int yourself, use `x2^N` (not `x(2^N-1)`) to match FFmpeg's `/2^N` normalization. Use `double` for 32-bit scaling since float32 can't represent 2^31 exactly
