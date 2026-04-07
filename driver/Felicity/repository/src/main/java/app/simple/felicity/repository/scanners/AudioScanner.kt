@@ -36,6 +36,21 @@ class AudioScanner() {
         )
 
         private val DSD_EXTENSIONS = hashSetOf("dsf", "dff", "dsd")
+
+        /** Directories to always exclude (messaging apps, system sounds, etc.) */
+        private val EXCLUDED_DIRS = listOf(
+            "/WhatsApp/",
+            "/WhatsApp Business/",
+            "/Telegram/",
+            "/Signal/",
+            "/Android/media/com.whatsapp",
+            "/Android/media/org.telegram",
+            "/Android/media/org.thoughtcrime.securesms",
+            "/Notifications/",
+            "/Ringtones/",
+            "/Alarms/",
+            "/Recordings/",
+        )
     }
 
     fun getAudioFiles(root: File): List<File> {
@@ -80,6 +95,10 @@ class AudioScanner() {
                 }
                 if (skipHiddenFolders && dir.name.startsWith(".")) {
                     Log.d(TAG, "Skipping hidden folder: ${dir.absolutePath}")
+                    return@onEnter false
+                }
+                // Skip messaging app media (WhatsApp, Telegram, etc.)
+                if (EXCLUDED_DIRS.any { dir.absolutePath.contains(it, ignoreCase = true) }) {
                     return@onEnter false
                 }
                 return@onEnter true
