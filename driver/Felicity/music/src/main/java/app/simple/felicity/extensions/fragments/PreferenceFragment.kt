@@ -909,6 +909,24 @@ abstract class PreferenceFragment : MediaFragment() {
                 }
         )
 
+        // ── DEBUG: HTTP streaming test (temporary — remove before release) ──
+        val debugHeader = Preference(type = PreferenceType.SUB_HEADER, title = R.string.filters)
+        val httpStreamTest = Preference(
+                title = R.string.debug_http_stream,
+                summary = R.string.debug_http_stream_summary,
+                icon = R.drawable.ic_refresh,
+                type = PreferenceType.DIALOG,
+                onPreferenceAction = { _, _ ->
+                    val url = "http://127.0.0.1:58432/test-track.flac"
+                    app.simple.felicity.engine.services.FelicityPlayerService.instance?.debugPlayHttpUrl(url)
+                        ?: Toast.makeText(requireContext(), "Service not running", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), "HTTP FLAC stream → playing", Toast.LENGTH_SHORT).show()
+                }
+        )
+        preferences.add(debugHeader)
+        preferences.add(httpStreamTest)
+        // ── END DEBUG ──
+
         preferences.add(shuffleHeader)
         preferences.add(currentShuffle)
         preferences.add(albumArtHeader)

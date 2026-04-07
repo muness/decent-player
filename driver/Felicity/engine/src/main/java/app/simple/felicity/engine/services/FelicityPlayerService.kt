@@ -94,6 +94,21 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
     private var renderersFactory: DefaultRenderersFactory? = null
     private var currentUsbSink: com.decent.usbaudio.media3.UsbAudioSink? = null
 
+    /** DEBUG: Play an HTTP URL directly via ExoPlayer. Call from any thread. */
+    fun debugPlayHttpUrl(url: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val item = androidx.media3.common.MediaItem.Builder()
+                .setUri(url)
+                .setMediaId("http_debug")
+                .build()
+            player.addMediaItem(item)
+            val lastIndex = player.mediaItemCount - 1
+            player.seekTo(lastIndex, 0)
+            player.playWhenReady = true
+            Log.i(TAG, "DEBUG: HTTP stream added at index $lastIndex, playing: $url")
+        }
+    }
+
     /**
      * The mediaId of the media item that was playing before the most recent item transition.
      * Used in conjunction with [previousItemEndPositionMs] and [previousItemDurationMs] to
@@ -166,6 +181,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
 
     override fun onCreate() {
         super.onCreate()
+        instance = this // DEBUG
         initRegisterSharedPreferenceChangeListener(applicationContext)
         playbackErrorNotifier = PlaybackErrorNotifier(applicationContext)
 
@@ -1660,6 +1676,9 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
 
     companion object {
         private const val TAG = "FelicityPlayerService"
+
+        /** DEBUG: static ref for HTTP streaming test. Remove before release. */
+        @Volatile var instance: FelicityPlayerService? = null
         private const val GAP_DURATION_MS = 800L // Duration of silence gap when gapless playback is disabled
 
         /**

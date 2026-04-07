@@ -230,6 +230,8 @@
     <string name="scanning_library">Scanning library…</string>
     <string name="scan_complete">Scan complete</string>
     <string name="no_music_found">No music found. Go to Settings → Library and run a manual scan.</string>
+    <string name="debug_http_stream">DEBUG: Play HTTP Stream</string>
+    <string name="debug_http_stream_summary">Inject a FLAC from local HTTP server into the queue (temporary test)</string>
     <string name="paste_lyrics_here">Paste Lyrics Here</string>
     <string name="save">Save</string>
     <string name="volume">Volume</string>

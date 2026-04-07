@@ -104,8 +104,13 @@ class UsbAudioSink(
                 usbStartMediaTimeNeedsInit = true
                 startNativeEngineIfFlac(stream)
                 // Engine starts paused with engineNeedsInitialSeek = true.
-                // handleBuffer will capture presentationTimeUs and seek to the
-                // correct position (which may be 02:30 on app restore, not 00:00).
+                // Temporarily unblock LoadControl so ExoPlayer sends at least one
+                // handleBuffer — needed to capture presentationTimeUs and seek.
+                // Without this, the LoadControl blocks immediately and the engine
+                // stays paused forever (HTTP→local transition race).
+                if (nativeEngine != null) {
+                    isNativeEngineActive = false
+                }
                 Log.i(TAG, "createEngineIfNeeded: engine=${nativeEngine != null}")
             }
         }

@@ -154,7 +154,32 @@ FLAC File (fd from Java)
 
 ExoPlayer remains active for playlist management, media session (lock screen, notifications), position tracking (via `engine.getPositionUs()`), and track transitions. A custom `NativeEngineAwareLoadControl` stops ExoPlayer from loading the same file in parallel (prevents FUSE I/O contention on SD cards).
 
-**Automatic fallback:** Non-FLAC formats (MP3, AAC, WAV) use Path 1 or 2 via the ExoPlayer pipeline. The `UsbAudioSink` handles the routing transparently.
+**Automatic routing via `attachToPlayer()`:**
+
+```
+                    ┌─────────────────────────────┐
+                    │    MediaItem URI             │
+                    └──────────┬──────────────────┘
+                               │
+                    ┌──────────▼──────────────────┐
+                    │   resolveTrackPath(uri)      │
+                    └──────────┬──────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+        file:// / bare   content://        http(s)://
+        path to .flac    MediaStore        streaming
+              │                │                │
+              ▼                ▼                ▼
+      NativeAudioEngine  NativeAudioEngine  ExoPlayer Pipeline
+      (C++ thread)       (via fd)           (Path 1 or 2)
+              │                │                │
+              └────────────────┴────────────────┘
+                               │
+                           USB DAC
+```
+
+All paths deliver bit-perfect audio. The routing is fully automatic and transparent to the integrating app. HTTP/HTTPS streams (incl. seedbox) use the ExoPlayer pipeline with FlacExtractor or FFmpeg — no configuration needed.
 
 ## Modules
 

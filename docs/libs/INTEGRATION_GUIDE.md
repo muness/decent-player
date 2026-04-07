@@ -218,10 +218,30 @@ currentUsbSink?.attachToPlayer(player)
 
 **That's it.** No manual `onMediaItemTransition` handling, no `runBlocking`, no `trackBitDepth` or `currentTrackPath` setting. The sink manages everything internally.
 
-**How it works:**
-- Local FLAC files (`file://`, `content://`) → NativeAudioEngine (C++ thread, zero JNI)
-- HTTP/HTTPS streams → ExoPlayer pipeline fallback (FlacExtractor or FFmpeg)
-- Non-FLAC formats → ExoPlayer pipeline (FFmpeg float path)
+**How it works — automatic routing by URI scheme:**
+
+| Source | URI scheme | Path | Decoder |
+|--------|-----------|------|---------|
+| Local FLAC (internal/SD) | `file://` or bare path | NativeAudioEngine (C++) | libFLAC native |
+| Local FLAC (MediaStore) | `content://` | NativeAudioEngine (C++) | libFLAC native |
+| HTTP/HTTPS FLAC stream | `http://`, `https://` | ExoPlayer pipeline | FlacExtractor (libFLAC) |
+| HTTP/HTTPS lossy stream | `http://`, `https://` | ExoPlayer pipeline | FFmpeg |
+| Local non-FLAC | `file://` | ExoPlayer pipeline | FFmpeg float |
+
+All paths output bit-perfect audio to the USB DAC. The NativeAudioEngine is used only for local FLAC files (where it eliminates JNI overhead and SD card I/O contention). For everything else, the ExoPlayer pipeline handles decode and routes to USB via the streaming thread.
+
+**Streaming-service integration:**
+
+The wrapper is fully compatible with streaming services. Any `DataSource` that ExoPlayer supports works automatically — the wrapper detects non-local URIs and uses the ExoPlayer pipeline. No special configuration needed. The service's `MediaSource.Factory` handles authentication and buffering; the wrapper handles USB output.
+
+Tested transitions:
+- Local FLAC → HTTP FLAC stream → Local FLAC (engine ↔ pipeline ↔ engine)
+- Cross-rate transitions during streaming (44.1kHz HTTP → 192kHz local)
+- Seamless USB reconfiguration on rate change
+
+**Potential extensions (not built-in):**
+
+FTP/SFTP seedbox playback is possible by implementing a custom `DataSource` for ExoPlayer (e.g., using Apache Commons Net or JSch). The wrapper handles it transparently — any non-local URI falls through to the ExoPlayer pipeline. Only the `DataSource.Factory` needs to be extended.
 
 The `wrapLoadControl()` prevents ExoPlayer from reading the audio file when the native engine is active, avoiding SD card FUSE I/O contention (measured: 1.4 GB → 18 MB in 30 seconds).
 
