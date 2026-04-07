@@ -134,7 +134,7 @@ object AudioPreferences {
     }
 
     fun isBitPerfectUsbEnabled(): Boolean {
-        return SharedPreferences.getSharedPreferences().getBoolean(BIT_PERFECT_USB_ENABLED, false)
+        return SharedPreferences.getSharedPreferences().getBoolean(BIT_PERFECT_USB_ENABLED, true)
     }
 
     // --------------------------------------------------------------------------------------------- //

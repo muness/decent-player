@@ -252,8 +252,13 @@ class UsbAudioSink(
                 usbStartMediaTimeUs = maxOf(0L, presentationTimeUs)
                 usbStartMediaTimeNeedsInit = false
                 // Save window offset once per track (not reset by flush/seek).
-                if (windowOffsetUs < 0) windowOffsetUs = usbStartMediaTimeUs
-                Log.i(TAG, "startMediaTimeUs=$usbStartMediaTimeUs windowOffset=$windowOffsetUs")
+                // windowOffset = ExoPlayer timeline position of track start (position 0).
+                // On fresh start: initialPlayerPosition=0 → offset = pts (correct).
+                // On restore at 158s: initialPlayerPosition=158s → offset = pts - 158s (correct).
+                if (windowOffsetUs < 0) {
+                    windowOffsetUs = presentationTimeUs - initialPlayerPositionUs
+                }
+                Log.i(TAG, "startMediaTimeUs=$usbStartMediaTimeUs windowOffset=$windowOffsetUs initialPos=${initialPlayerPositionUs / 1000}ms")
 
                 // After a flush (seek) or initial start, seek the native engine
                 // to the correct position and resume it.
@@ -754,9 +759,20 @@ class UsbAudioSink(
         integrationListener = null
     }
 
+    /** Player position (us) captured in onMediaItemTransition. Used to calculate
+     *  the correct window offset on restore (first handleBuffer pts is at the
+     *  restored position, not at 0). */
+    @Volatile
+    private var initialPlayerPositionUs: Long = 0L
+
     private inner class PlayerIntegrationListener : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (mediaItem == null) return
+
+            // Capture player position BEFORE engine creation. On restore this is
+            // the saved position (e.g., 158s). On fresh start this is 0.
+            initialPlayerPositionUs = (attachedPlayer?.currentPosition ?: 0L) * 1000L
+            Log.i(TAG, "onMediaItemTransition: initialPlayerPos=${initialPlayerPositionUs / 1000}ms")
 
             val uri = mediaItem.localConfiguration?.uri
 
