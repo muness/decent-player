@@ -47,11 +47,6 @@ object PlaybackStateManager {
             position = MediaManager.getCurrentPosition()
         }
 
-        if (seek == 0L) {
-            Log.w(logTag, "Seek position is zero, skipping state save")
-            return false
-        }
-
         return try {
             val audioDatabase = AudioDatabase.getInstance(context)
             savePlaybackState(
@@ -108,9 +103,15 @@ object PlaybackStateManager {
             PlaybackQueueEntry(queuePos = pos, audioHash = hash)
         }
 
+        // Always persist the queue (prevents loss on swipe-kill while playing).
         db.playbackQueueDao().clear()
         db.playbackQueueDao().insertAll(entries)
-        db.playbackStateDao().save(state)
+
+        // Only persist position if meaningful. During track transitions the seek
+        // position is momentarily 0 — saving that would overwrite the last valid state.
+        if (position > 0) {
+            db.playbackStateDao().save(state)
+        }
     }
 
     /**

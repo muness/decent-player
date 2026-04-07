@@ -103,13 +103,9 @@ class UsbAudioSink(
                 windowOffsetUs = -1L
                 usbStartMediaTimeNeedsInit = true
                 startNativeEngineIfFlac(stream)
-                // Resume immediately at position 0 — don't wait for handleBuffer
-                val engine = nativeEngine
-                if (engine != null) {
-                    engine.seek(0)
-                    engine.resume()
-                    engineNeedsInitialSeek = false
-                }
+                // Engine starts paused with engineNeedsInitialSeek = true.
+                // handleBuffer will capture presentationTimeUs and seek to the
+                // correct position (which may be 02:30 on app restore, not 00:00).
                 Log.i(TAG, "createEngineIfNeeded: engine=${nativeEngine != null}")
             }
         }
@@ -147,6 +143,7 @@ class UsbAudioSink(
 
     /** Path of the file the current native engine is decoding. Used to detect track changes. */
     private var activeEnginePath: String? = null
+
 
     /** Max queue entries before returning false for backpressure (paces ExoPlayer).
      *  Pause responsiveness is handled by pauseStreaming(), not queue size. */
@@ -246,20 +243,15 @@ class UsbAudioSink(
             // try creating one now (path and USB rate should both be correct by this point)
             if (nativeEngine == null && usbStreamingThread == null) {
                 startNativeEngineIfFlac(stream)
-                // If engine was just created paused, seek to 0 and resume
-                val newEngine = nativeEngine
-                if (newEngine != null && engineNeedsInitialSeek) {
-                    newEngine.seek(0)
-                    if (isPlaying) newEngine.resume()
-                    engineNeedsInitialSeek = false
-                }
+                // Engine starts paused. The usbStartMediaTimeNeedsInit block below
+                // will capture presentationTimeUs and seek to the correct position.
             }
 
             // Capture media timeline offset from first buffer (needed for position tracking)
             if (usbStartMediaTimeNeedsInit) {
                 usbStartMediaTimeUs = maxOf(0L, presentationTimeUs)
                 usbStartMediaTimeNeedsInit = false
-                // Save window offset once per track (not reset by flush/seek)
+                // Save window offset once per track (not reset by flush/seek).
                 if (windowOffsetUs < 0) windowOffsetUs = usbStartMediaTimeUs
                 Log.i(TAG, "startMediaTimeUs=$usbStartMediaTimeUs windowOffset=$windowOffsetUs")
 
