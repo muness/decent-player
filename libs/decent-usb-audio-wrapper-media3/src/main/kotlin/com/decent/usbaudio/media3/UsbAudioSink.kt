@@ -3,11 +3,18 @@ package com.decent.usbaudio.media3
 import android.content.Context
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
@@ -39,8 +46,8 @@ class UsbAudioSink(
     private val config: UsbAudioSinkConfig = UsbAudioSinkConfig()
 ) : ForwardingAudioSink(delegate) {
 
-    /** Source file bit depth (16, 24, 32). Set by the app on each track transition. */
-    var trackBitDepth: Int = 0
+    /** Source file bit depth (16, 24, 32). Auto-detected from NativeAudioEngine. */
+    private var trackBitDepth: Int = 0
 
     /** True when the native engine is running. Read by [NativeEngineAwareLoadControl]
      *  to stop ExoPlayer from loading data (prevents SD card I/O contention).
@@ -50,18 +57,14 @@ class UsbAudioSink(
         private set
 
 
-    /** File path of the current track. Set by the app on each track transition.
-     *  When non-null and pointing to a FLAC file, the native audio engine is used. */
-    var currentTrackPath: String? = null
+    /** File path of the current track. Set internally by [PlayerIntegrationListener]
+     *  from the MediaItem URI. When non-null and pointing to a FLAC file, the native
+     *  audio engine is used. For HTTP URIs, this is null (ExoPlayer pipeline fallback). */
+    private var currentTrackPath: String? = null
 
-    /** Called when the native engine finishes playing (EOF).
-     *  The host must call player.seekToNext() because ExoPlayer's renderer
-     *  never reaches outputStreamEnded when LoadControl blocks loading. */
-    var onNativeEngineFinished: (() -> Unit)? = null
-
-    /** Call from FelicityPlayerService.onMediaItemTransition to clean up a finished engine.
+    /** Clean up a finished native engine and apply deferred USB config.
      *  @return true if an engine was cleaned up (caller should restart playback). */
-    fun cleanupFinishedEngine(): Boolean {
+    private fun cleanupFinishedEngine(): Boolean {
         val engine = nativeEngine
         if (engine != null && !engine.isRunning) {
             engine.destroy()
@@ -83,10 +86,9 @@ class UsbAudioSink(
         return false
     }
 
-    /** Call from FelicityPlayerService AFTER setting currentTrackPath.
-     *  Creates a native engine if the USB stream is ready and no engine exists.
+    /** Creates a native engine if the USB stream is ready and no engine exists.
      *  Replaces the streaming thread fallback if one was set up due to rate mismatch. */
-    fun createEngineIfNeeded() {
+    private fun createEngineIfNeeded() {
         if (nativeEngine?.isRunning == true) return  // already running
         val stream = usbAudioStream
         if (stream != null && stream.isAlive) {
@@ -363,13 +365,22 @@ class UsbAudioSink(
                         "running=${engine?.isRunning} window=$windowOffsetUs enginePos=${engine?.getPositionUs()}")
             }
 
-            // Detect engine finished — notify host to transition to next track.
+            // Detect engine finished — advance to next track internally.
             // ExoPlayer's renderer never reaches outputStreamEnded because
-            // LoadControl blocked loading, so we must trigger the skip externally.
+            // LoadControl blocked loading, so we skip externally via the Player ref.
             if (engine != null && !engine.isRunning && !engineEndNotified) {
                 engineEndNotified = true
-                Log.i(TAG, "Engine finished — notifying host for track transition")
-                onNativeEngineFinished?.invoke()
+                Log.i(TAG, "Engine finished — advancing to next track")
+                val p = attachedPlayer
+                if (p != null) {
+                    Handler(Looper.getMainLooper()).post {
+                        if (p.hasNextMediaItem()) {
+                            p.seekToNextMediaItem()
+                        } else {
+                            p.pause()
+                        }
+                    }
+                }
             }
 
             // Native engine: absolute FLAC position + window offset
@@ -631,7 +642,8 @@ class UsbAudioSink(
                         engineNeedsInitialSeek = true
                         engineEndNotified = false
                         activeEnginePath = path
-                        Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name}")
+                        trackBitDepth = engine.getBitsPerSample()
+                        Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name} ${trackBitDepth}-bit")
                         return
                     }
                 }
@@ -710,7 +722,132 @@ class UsbAudioSink(
         try { delegate.setPreferredDevice(null) } catch (_: Exception) {}
     }
 
+    // ── Player integration (attachToPlayer) ──────────────────────
+
+    @Volatile private var attachedPlayer: Player? = null
+    private var integrationListener: Player.Listener? = null
+
+    /**
+     * Attach this sink to an ExoPlayer instance. Registers an internal
+     * [Player.Listener] that handles:
+     * - Extracting the file path from each [MediaItem]'s URI
+     * - Cleaning up finished native engines on track transitions
+     * - Creating new native engines for local FLAC files
+     * - Advancing to the next track when the native engine reaches EOF
+     *
+     * Must be called on the main thread, after [ExoPlayer.Builder.build].
+     */
+    fun attachToPlayer(player: Player) {
+        val oldListener = integrationListener
+        val oldPlayer = attachedPlayer
+        if (oldListener != null && oldPlayer != null) {
+            oldPlayer.removeListener(oldListener)
+        }
+
+        val listener = PlayerIntegrationListener()
+        player.addListener(listener)
+        attachedPlayer = player
+        integrationListener = listener
+        Log.i(TAG, "attachToPlayer: integration listener registered")
+    }
+
+    /** Detach from the current player. Call before player.release(). */
+    fun detachFromPlayer() {
+        val listener = integrationListener
+        val player = attachedPlayer
+        if (listener != null && player != null) {
+            player.removeListener(listener)
+        }
+        attachedPlayer = null
+        integrationListener = null
+    }
+
+    private inner class PlayerIntegrationListener : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (mediaItem == null) return
+
+            val uri = mediaItem.localConfiguration?.uri
+
+            // 1. Clean up finished engine from previous track
+            val engineFinished = cleanupFinishedEngine()
+
+            // 2. Resolve file path from URI
+            val resolvedPath = resolveTrackPath(uri)
+            currentTrackPath = resolvedPath
+            Log.i(TAG, "onMediaItemTransition: uri=$uri path=$resolvedPath")
+
+            // 3. Create engine if local FLAC
+            if (resolvedPath != null) {
+                createEngineIfNeeded()
+            }
+
+            // 4. If previous engine finished, reset position for new track
+            if (engineFinished) {
+                attachedPlayer?.seekTo(0)
+            }
+        }
+    }
+
+    /**
+     * Resolve a [MediaItem]'s URI to a local file path for the native engine.
+     *
+     * - `file:///path/to/song.flac` → `/path/to/song.flac`
+     * - `/storage/.../song.flac` (bare path) → as-is
+     * - `content://media/external/audio/123` → resolved via ContentResolver
+     * - `http://` or `https://` → null (ExoPlayer pipeline handles these)
+     */
+    private fun resolveTrackPath(uri: Uri?): String? {
+        if (uri == null) return null
+        return when (uri.scheme) {
+            "file" -> uri.path
+            "content" -> resolveContentUri(uri)
+            "http", "https" -> {
+                Log.i(TAG, "resolveTrackPath: HTTP URI → ExoPlayer pipeline (no native engine)")
+                null
+            }
+            null -> {
+                // Bare path string (no scheme) — common in local music players
+                val pathStr = uri.toString()
+                if (pathStr.startsWith("/")) pathStr else null
+            }
+            else -> null
+        }
+    }
+
+    private fun resolveContentUri(uri: Uri): String? {
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.Audio.Media.DATA),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                    if (idx >= 0) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveContentUri failed: ${e.message}")
+            null
+        }
+    }
+
     companion object {
         private const val TAG = "UsbAudioSink"
+
+        /**
+         * Wraps a [LoadControl] to suppress ExoPlayer loading when the native
+         * FLAC engine is decoding directly to USB. Call BEFORE [ExoPlayer.Builder.build].
+         *
+         * @param delegate       Your app's LoadControl (e.g., DefaultLoadControl).
+         * @param isEngineActive Lambda returning true when native engine is active.
+         *                       Typical: `{ usbSink?.isNativeEngineActive == true }`
+         */
+        @JvmStatic
+        @OptIn(UnstableApi::class)
+        fun wrapLoadControl(
+            delegate: LoadControl,
+            isEngineActive: () -> Boolean
+        ): LoadControl = NativeEngineAwareLoadControl(delegate, isEngineActive)
     }
 }

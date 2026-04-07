@@ -23,7 +23,7 @@ import androidx.media3.exoplayer.upstream.Allocator
  * Every method must be explicitly overridden.
  */
 @OptIn(UnstableApi::class)
-class NativeEngineAwareLoadControl(
+internal class NativeEngineAwareLoadControl(
     private val delegate: LoadControl,
     private val isNativeEngineActive: () -> Boolean
 ) : LoadControl {

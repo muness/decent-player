@@ -27,7 +27,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
-import com.decent.usbaudio.media3.NativeEngineAwareLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -262,19 +261,6 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 return if (AudioPreferences.isBitPerfectUsbEnabled()) {
                     com.decent.usbaudio.media3.UsbAudioSink(audioSink, context).also {
                         currentUsbSink = it
-                        it.onNativeEngineFinished = {
-                            // Native engine reached EOF. ExoPlayer's renderer never
-                            // reaches outputStreamEnded (LoadControl blocked loading),
-                            // so we must skip to next track externally.
-                            Log.i(TAG, "Native engine EOF — skipping to next track")
-                            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                if (player.hasNextMediaItem()) {
-                                    player.seekToNextMediaItem()
-                                } else {
-                                    player.pause()
-                                }
-                            }
-                        }
                     }
                 } else {
                     currentUsbSink = null
@@ -388,9 +374,9 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
 
         Log.i(TAG, "LoadControl configured for ${if (hiresEnabled) "Hi-Res" else "Standard"} mode")
 
-        // Wrap with NativeEngineAwareLoadControl to stop ExoPlayer from reading
-        // the SD card when the native FLAC engine is handling decode+USB directly.
-        val wrappedLoadControl = NativeEngineAwareLoadControl(loadControl) {
+        // Wrap LoadControl to stop ExoPlayer from reading the SD card
+        // when the native FLAC engine is handling decode+USB directly.
+        val wrappedLoadControl = com.decent.usbaudio.media3.UsbAudioSink.wrapLoadControl(loadControl) {
             currentUsbSink?.isNativeEngineActive == true
         }
 
@@ -408,6 +394,9 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
+
+        // Connect USB sink to player (internalizes engine lifecycle management)
+        currentUsbSink?.attachToPlayer(player)
 
         // Set initial silence state based on preferences
         setSilenceState()
@@ -434,6 +423,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         val playWhenReady = player.playWhenReady
 
         // Release the old player to free up codecs/resources
+        currentUsbSink?.detachFromPlayer()
         player.removeListener(playerListener)
         player.release()
 
@@ -466,6 +456,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         Log.i(TAG, "Switching audio mode to: ${if (hiresEnabled) "Hi-Res (32-bit Float)" else "Standard (16-bit PCM)"}")
 
         // Release the old player to free up audio resources
+        currentUsbSink?.detachFromPlayer()
         player.removeListener(playerListener)
         player.release()
 
@@ -554,6 +545,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // Temporarily force the FFmpeg extension without touching user preferences.
         renderersFactory?.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
 
+        currentUsbSink?.detachFromPlayer()
         player.removeListener(playerListener)
         player.release()
 
@@ -585,6 +577,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         val currentPos = player.currentPosition
         val playWhenReady = player.playWhenReady
 
+        currentUsbSink?.detachFromPlayer()
         player.removeListener(playerListener)
         player.release()
 
@@ -636,7 +629,7 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 .build()
         }
 
-        val wrappedLoadControl = NativeEngineAwareLoadControl(loadControl) {
+        val wrappedLoadControl = com.decent.usbaudio.media3.UsbAudioSink.wrapLoadControl(loadControl) {
             currentUsbSink?.isNativeEngineActive == true
         }
 
@@ -653,6 +646,8 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
+
+        currentUsbSink?.attachToPlayer(player)
 
         setSilenceState()
         configureGaplessPlayback()
@@ -881,26 +876,8 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 previousItemMediaId = item.mediaId
                 val audioId = item.mediaId.toLongOrNull() ?: return@let
 
-                // Set bit depth SYNCHRONOUSLY before ExoPlayer calls configure().
-                // The UsbAudioSink uses this to select the optimal USB alt setting.
-                val usbSink = currentUsbSink
-                if (usbSink != null) {
-                    var engineFinished = false
-                    runBlocking(Dispatchers.IO) {
-                        val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
-                        engineFinished = usbSink.cleanupFinishedEngine()
-                        usbSink.trackBitDepth = audio.bitPerSample.toInt()
-                        usbSink.currentTrackPath = audio.path
-                        AudioPreferences.setCurrentTrackBitDepth(audio.bitPerSample.toInt())
-                        // Create engine NOW with correct path (not lazy in handleBuffer
-                        // which fires before path is updated)
-                        usbSink.createEngineIfNeeded()
-                        Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}, path=${audio.path}")
-                    }
-                    if (engineFinished) {
-                        player.seekTo(0)
-                    }
-                }
+                // Engine lifecycle (cleanup, path resolution, engine creation) is
+                // handled internally by UsbAudioSink.attachToPlayer() listener.
 
                 serviceScope.launch(Dispatchers.IO) {
                     val audio = audioRepository.getAudioById(audioId) ?: return@launch
@@ -1102,6 +1079,8 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         // Clear the visualizer processor reference so no stale direct-output connection
         // remains after the service has been destroyed.
         VisualizerManager.processor = null
+
+        currentUsbSink?.detachFromPlayer()
 
         mediaSession?.run {
             player.release()

@@ -191,65 +191,39 @@ No app code is needed to distinguish the paths.
 
 **Note on `buildAudioRenderers()`:** You do NOT need to override `buildAudioRenderers()` or remove any renderers. When libFLAC is in the classpath, ExoPlayer's `FlacExtractor` decodes FLAC at the extractor level (before any renderer is consulted), so renderer selection is irrelevant for FLAC files.
 
-### Step 5: Build the ExoPlayer with NativeEngineAwareLoadControl
-
-Wrap the `LoadControl` with `NativeEngineAwareLoadControl` to prevent ExoPlayer from reading the audio file when the native engine is active. Without this, ExoPlayer's `FlacExtractor` reads the same file in parallel, causing SD card I/O contention through Android's FUSE layer.
+### Step 5: Build ExoPlayer with LoadControl Wrapper and Attach
 
 ```kotlin
-import com.decent.usbaudio.media3.NativeEngineAwareLoadControl
-
-val defaultLoadControl = DefaultLoadControl.Builder()
-    .setBufferDurationsMs(5000, 15000, 2000, 3000)
-    .build()
-
-// Wrap: stops ExoPlayer loading when native engine handles decode+USB
-val loadControl = NativeEngineAwareLoadControl(defaultLoadControl) {
-    currentUsbSink?.isNativeEngineActive == true
-}
+// Wrap LoadControl to prevent ExoPlayer from reading the SD card
+// when the native FLAC engine is handling decode+USB directly.
+val loadControl = UsbAudioSink.wrapLoadControl(
+    DefaultLoadControl.Builder()
+        .setBufferDurationsMs(5000, 15000, 2000, 3000)
+        .build()
+) { currentUsbSink?.isNativeEngineActive == true }
 
 val player = ExoPlayer.Builder(this)
     .setRenderersFactory(createRenderersFactory())
     .setLoadControl(loadControl)
     .build()
+
+// Connect the sink to the player. This registers an internal Player.Listener
+// that handles everything automatically:
+// - Extracts file path from MediaItem URI (file://, content://, http://)
+// - Creates/destroys NativeAudioEngine on track transitions
+// - Advances to next track on engine EOF
+// - Auto-detects bit depth from FLAC header
+currentUsbSink?.attachToPlayer(player)
 ```
 
-**Why this matters:** Without the LoadControl wrapper, ExoPlayer reads the audio file at full speed through its extractor, even though the native engine is also reading it. On SD cards through FUSE, this caused 1.4 GB of reads in 30 seconds (vs 18 MB with the wrapper). The wrapper stops all loading when the engine is active, but allows one post-seek chunk through so `handleBuffer()` can capture `presentationTimeUs` for position tracking.
+**That's it.** No manual `onMediaItemTransition` handling, no `runBlocking`, no `trackBitDepth` or `currentTrackPath` setting. The sink manages everything internally.
 
-### Step 6: Set Track Bit Depth and File Path on Each Track Transition
+**How it works:**
+- Local FLAC files (`file://`, `content://`) → NativeAudioEngine (C++ thread, zero JNI)
+- HTTP/HTTPS streams → ExoPlayer pipeline fallback (FlacExtractor or FFmpeg)
+- Non-FLAC formats → ExoPlayer pipeline (FFmpeg float path)
 
-The sink needs the source file's bit depth (for USB alt setting selection) and file path (for the NativeAudioEngine). Set both **synchronously** in `onMediaItemTransition` — this must complete before ExoPlayer calls `configure()` on the sink:
-
-```kotlin
-player.addListener(object : Player.Listener {
-    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-        mediaItem?.let { item ->
-            val audioId = item.mediaId.toLongOrNull() ?: return@let
-            val usbSink = currentUsbSink ?: return@let
-            
-            // MUST be synchronous (runBlocking) so bit depth and path are set
-            // before ExoPlayer calls configure() on the audio sink.
-            runBlocking(Dispatchers.IO) {
-                val audio = audioRepository.getAudioById(audioId) ?: return@runBlocking
-                
-                // Clean up finished engine from previous track
-                usbSink.cleanupFinishedEngine()
-                
-                // Set metadata BEFORE configure() fires
-                usbSink.trackBitDepth = audio.bitPerSample.toInt()  // 16, 24, or 32
-                usbSink.currentTrackPath = audio.path               // file path for NativeAudioEngine
-                
-                // Create native engine immediately (if FLAC + USB active).
-                // Don't wait for handleBuffer — path must be set first.
-                usbSink.createEngineIfNeeded()
-            }
-        }
-    }
-})
-```
-
-**Why `currentTrackPath`?** The `NativeAudioEngine` opens the FLAC file directly via `open()` + file descriptor, bypassing ExoPlayer's DataSource. The path must be set before the engine is created. For non-FLAC files, the path is ignored and ExoPlayer's pipeline handles playback normally.
-
-**Why synchronous?** ExoPlayer calls `onMediaItemTransition` then `configure()` on the sink. If the path and bit depth aren't set before `configure()` runs, the engine either fails to create or uses stale metadata.
+The `wrapLoadControl()` prevents ExoPlayer from reading the audio file when the native engine is active, avoiding SD card FUSE I/O contention (measured: 1.4 GB → 18 MB in 30 seconds).
 
 ### Step 7: Configuration Options (Optional)
 
