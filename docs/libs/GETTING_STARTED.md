@@ -10,6 +10,8 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 - **Seamless track transitions** — xHCI-verified transition sequence for reliable rate changes
 - **NativeAudioEngine** — single C++ thread: FLAC decode → USB output, zero JNI in hot path, ~10x headroom on weak CPUs
 - **Three bit-perfect paths** — native engine (FLAC), float round-trip (FFmpeg, all formats), zero-float integer (libFLAC extractor)
+- **SFTP/HTTP streaming** — play from seedbox or HTTP server, bit-perfect through ExoPlayer pipeline
+- **Local cache** — 500MB LRU cache for network streams; replayed content instant from disk
 - **Works with any USB Audio Class 2.0 DAC**
 
 ## Requirements

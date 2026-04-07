@@ -179,7 +179,7 @@ ExoPlayer remains active for playlist management, media session (lock screen, no
                            USB DAC
 ```
 
-All paths deliver bit-perfect audio. The routing is fully automatic and transparent to the integrating app. HTTP/HTTPS streams and SFTP/FTP (seedbox) use the ExoPlayer pipeline with FlacExtractor or FFmpeg. SFTP/FTP is handled by the built-in `VfsDataSource` (Apache Commons VFS) via `DecentDataSourceFactory`.
+All paths deliver bit-perfect audio. The routing is fully automatic and transparent to the integrating app. HTTP/HTTPS streams and SFTP (seedbox) use the ExoPlayer pipeline with FlacExtractor or FFmpeg. SFTP is handled by the built-in `SftpDataSource` (JSch with native offset seek) via `DecentDataSourceFactory`. All network streams are cached locally (500MB LRU) for instant seeks on replayed content.
 
 ## Modules
 
@@ -205,6 +205,8 @@ Drop-in `ForwardingAudioSink` for Media3/ExoPlayer apps.
 |-----------|------|------|
 | `UsbAudioSink` | `UsbAudioSink.kt` | ForwardingAudioSink with USB routing, NativeAudioEngine management, rate transitions, stale fd detection, tri-path handleBuffer (native engine / float / raw) |
 | `NativeEngineAwareLoadControl` | `NativeEngineAwareLoadControl.kt` | LoadControl wrapper that stops ExoPlayer file loading when native engine is active (prevents SD card FUSE I/O contention) |
+| `SftpDataSource` | `SftpDataSource.kt` | Media3 DataSource for SFTP streaming with JSch native offset seek (`ChannelSftp.get(path, null, offset)`) and SSH session caching |
+| `DecentDataSourceFactory` | `DecentDataSourceFactory.kt` | Composite DataSource.Factory: routes SFTP to SftpDataSource, all else to default. Wraps both with `SimpleCache` (500MB LRU) for local caching of network streams |
 | `UsbStreamingThread` | `UsbStreamingThread.kt` | Producer-consumer queue decoupling render thread from USB timing; supports FloatBuffer and RawBuffer types, pause/resume |
 | `UsbAudioSinkConfig` | `UsbAudioSinkConfig.kt` | Configuration (bitPerfectEnabled, forceRouteToSpeaker) |
 | `PcmUtils` | `PcmUtils.kt` | PCM encoding detection, bytes-per-sample, float conversion utilities |

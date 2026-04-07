@@ -24,7 +24,7 @@ Three standalone libraries that any Android app can use:
 Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, float-to-integer and raw integer conversion with bit-perfect math. Includes **NativeAudioEngine** — a single C++ thread that does FLAC decode → bit-depth conversion → USB output with ~10x headroom even on weak CPUs.
 
 ### `com.decent:usb-audio-wrapper-media3`
-Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Three lines to integrate:
+Drop-in ExoPlayer/Media3 `AudioSink` wrapper with SFTP streaming and local cache. Three lines to integrate:
 
 ```kotlin
 // 1. In buildAudioSink():
@@ -80,6 +80,8 @@ Float conversion:       x2^N round-trip (exact for 16/24-bit)
 Raw int path:           zero float, integer shift only (libFLAC)
 URB pipeline:           80 in-flight, zero drops, zero timeouts
 SD card I/O:            18 MB / 30s (vs 1,390 MB before optimization)
+SFTP streaming:         native offset seek via JSch + 500MB local cache
+Network sources:        SFTP seedbox + HTTP server, bit-perfect verified
 ```
 
 ---
@@ -99,8 +101,11 @@ Before this, bit-perfect USB audio on Android was not available as open-source. 
 This repo contains:
 - Three standalone libraries (`libs/`) ready for integration in any Media3 app
 - **Three bit-perfect paths**: NativeAudioEngine (local FLAC, C++), FFmpeg float (all formats), libFLAC raw int (FLAC extractor)
-- **Automatic routing** via `attachToPlayer()`: local files → NativeAudioEngine, HTTP/HTTPS streams → ExoPlayer pipeline
-- **HTTP streaming verified**: FLAC via HTTP plays bit-perfect through ExoPlayer pipeline + USB
+- **Automatic routing** via `attachToPlayer()`: local files → NativeAudioEngine, HTTP/SFTP streams → ExoPlayer pipeline
+- **SFTP streaming**: play FLAC from seedbox via JSch with native offset seek — bit-perfect USB output
+- **HTTP streaming**: play from any HTTP server — verified bit-perfect
+- **Local cache**: 500MB LRU via ExoPlayer SimpleCache — network streams cached for instant replay/seek
+- **Network browser** (Felicity PoC): browse SFTP/HTTP folders, tap to play
 - Complete technical documentation of the USB audio driver and libraries
 - Investigation notes, USB protocol analysis, xHCI ftrace analysis
 - Proof-of-concept integration inside a Felicity Music Player fork (`driver/Felicity/`)
@@ -118,6 +123,7 @@ This repo contains:
 | [Architecture](docs/libs/ARCHITECTURE.md) | Pipeline diagram, thread model, rate transitions, bit-perfect math |
 | [FLAC Decoders](docs/libs/FLAC_DECODERS.md) | libFLAC vs FFmpeg comparison, integration details |
 | [FLAC Build Instructions](docs/libs/DECODER_FLAC_BUILD.md) | How to build the native FLAC decoder from source |
+| [DSD Support](docs/libs/DSD_SUPPORT.md) | Future DSD implementation plan (DoP and DSD Native) |
 
 ### Driver investigation docs (deep technical reference)
 

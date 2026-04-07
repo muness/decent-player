@@ -226,7 +226,7 @@ currentUsbSink?.attachToPlayer(player)
 | Local FLAC (MediaStore) | `content://` | NativeAudioEngine (C++) | libFLAC native |
 | HTTP/HTTPS FLAC stream | `http://`, `https://` | ExoPlayer pipeline | FlacExtractor (libFLAC) |
 | HTTP/HTTPS lossy stream | `http://`, `https://` | ExoPlayer pipeline | FFmpeg |
-| SFTP/FTP FLAC (seedbox) | `sftp://`, `ftp://` | ExoPlayer pipeline (VfsDataSource) | FlacExtractor (libFLAC) |
+| SFTP FLAC (seedbox) | `sftp://` | ExoPlayer pipeline (SftpDataSource + cache) | FlacExtractor (libFLAC) |
 | Local non-FLAC | `file://` | ExoPlayer pipeline | FFmpeg float |
 
 All paths output bit-perfect audio to the USB DAC. The NativeAudioEngine is used only for local FLAC files (where it eliminates JNI overhead and SD card I/O contention). For everything else, the ExoPlayer pipeline handles decode and routes to USB via the streaming thread.
@@ -240,13 +240,13 @@ Tested transitions:
 - Cross-rate transitions during streaming (44.1kHz HTTP → 192kHz local)
 - Seamless USB reconfiguration on rate change
 
-**SFTP/FTP seedbox playback (built-in):**
+**SFTP seedbox playback (built-in):**
 
-The wrapper includes `VfsDataSource` powered by Apache Commons VFS, supporting `sftp://`, `ftp://`, and `ftps://` URIs out of the box. Use `DecentDataSourceFactory` to enable it:
+The wrapper includes `SftpDataSource` powered by JSch, supporting `sftp://` URIs with native offset seek. Use `DecentDataSourceFactory` to enable it (also adds local caching for all network streams):
 
 ```kotlin
 val mediaSourceFactory = DefaultMediaSourceFactory(
-    DecentDataSourceFactory(context)  // routes sftp:// to VFS, everything else to default
+    DecentDataSourceFactory(context)  // routes sftp:// to JSch, caches all network streams
 )
 val player = ExoPlayer.Builder(context)
     .setMediaSourceFactory(mediaSourceFactory)
@@ -261,7 +261,14 @@ player.prepare()
 player.play()
 ```
 
-The VFS DataSource handles SFTP authentication, path resolution (including chroot-relative paths), and streams data to ExoPlayer's decoder pipeline → USB bit-perfect output. Tested with FLAC from remote seedbox at 44.1kHz through Cayin RU7.
+Features:
+- **Native offset seek**: `ChannelSftp.get(path, null, offset)` sends `SSH_FXP_READ` at exact byte position — no sequential skip
+- **SSH session caching**: session reused across seeks (only SFTP channel reopened when stale)
+- **SFTP chroot handling**: automatic retry with relative path if absolute fails
+- **Local cache**: 500MB LRU via ExoPlayer's `SimpleCache` — replayed content serves from disk instantly
+- **Path safety**: manual URI parser accepts `[]`, `()`, CJK characters in filenames
+
+Tested with FLAC from remote seedbox at 44.1kHz through iBasso DX340 + Cayin RU7.
 
 The `wrapLoadControl()` prevents ExoPlayer from reading the audio file when the native engine is active, avoiding SD card FUSE I/O contention (measured: 1.4 GB → 18 MB in 30 seconds).
 
