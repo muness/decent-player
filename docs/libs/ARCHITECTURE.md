@@ -2,7 +2,7 @@
 
 ## Audio Pipeline
 
-There are two decoding paths, both bit-perfect. The `UsbAudioSink` handles both automatically.
+There are three decoding paths, all bit-perfect. The `UsbAudioSink` routes automatically based on URI scheme and file format via `attachToPlayer()`.
 
 ### Path 1: FFmpeg (float, all formats)
 

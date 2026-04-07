@@ -21,26 +21,28 @@ Every other app accepts this. We didn't.
 Three standalone libraries that any Android app can use:
 
 ### `com.decent:usb-audio-driver`
-Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, and both float-to-integer and raw integer-to-integer conversion with bit-perfect math.
+Core USB Audio Class 2.0 driver. Native C++ with JNI. Handles device detection, descriptor parsing, clock control, isochronous URB pipeline, float-to-integer and raw integer conversion with bit-perfect math. Includes **NativeAudioEngine** — a single C++ thread that does FLAC decode → bit-depth conversion → USB output with ~10x headroom even on weak CPUs.
 
 ### `com.decent:usb-audio-wrapper-media3`
-Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Adds a dedicated streaming thread, automatic sample rate switching, xHCI-verified transition sequences, and dual-path buffer handling (float from FFmpeg, raw int from libFLAC). Integrates in a few lines.
-
-### `com.decent:media3-decoder-flac`
-Optional native FLAC decoder built from xiph/flac source. When in the classpath, ExoPlayer automatically decodes FLAC files to raw integer PCM at the extractor level — zero float math in the entire pipeline. Non-FLAC formats use the FFmpeg extension if present.
+Drop-in ExoPlayer/Media3 `AudioSink` wrapper. Three lines to integrate:
 
 ```kotlin
-// Bit-perfect USB audio in your Media3 app.
-val hasLibFlac = try {
-    Class.forName("androidx.media3.decoder.flac.LibflacAudioRenderer")
-    true
-} catch (_: ClassNotFoundException) { false }
+// 1. In buildAudioSink():
+val sink = UsbAudioSink(delegate, context)
 
-val delegate = DefaultAudioSink.Builder(context)
-    .setEnableFloatOutput(!hasLibFlac)  // raw int with libFLAC, float without
-    .build()
-return UsbAudioSink(delegate, context)
+// 2. Wrap LoadControl:
+val loadControl = UsbAudioSink.wrapLoadControl(defaultLoadControl) {
+    sink.isNativeEngineActive
+}
+
+// 3. After player.build():
+sink.attachToPlayer(player)
 ```
+
+`attachToPlayer()` handles everything automatically — NativeAudioEngine lifecycle, track path extraction, seek position restore, EOF-to-next-track, and seamless transitions between local files and HTTP streams.
+
+### `com.decent:media3-decoder-flac`
+Optional native FLAC decoder built from xiph/flac source. When in the classpath, ExoPlayer automatically decodes FLAC files to raw integer PCM at the extractor level — zero float math in the entire pipeline. Also provides the FLACParser used by NativeAudioEngine.
 
 See [Getting Started](docs/libs/GETTING_STARTED.md) for the full quick-start guide.
 
@@ -96,6 +98,9 @@ Before this, bit-perfect USB audio on Android was not available as open-source. 
 
 This repo contains:
 - Three standalone libraries (`libs/`) ready for integration in any Media3 app
+- **Three bit-perfect paths**: NativeAudioEngine (local FLAC, C++), FFmpeg float (all formats), libFLAC raw int (FLAC extractor)
+- **Automatic routing** via `attachToPlayer()`: local files → NativeAudioEngine, HTTP/HTTPS streams → ExoPlayer pipeline
+- **HTTP streaming verified**: FLAC via HTTP plays bit-perfect through ExoPlayer pipeline + USB
 - Complete technical documentation of the USB audio driver and libraries
 - Investigation notes, USB protocol analysis, xHCI ftrace analysis
 - Proof-of-concept integration inside a Felicity Music Player fork (`driver/Felicity/`)

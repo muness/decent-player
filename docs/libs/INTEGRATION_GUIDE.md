@@ -175,7 +175,7 @@ class MyPlayerService : ... {
 }
 ```
 
-**How the two decoding paths work:**
+**How the three decoding paths work (ExoPlayer pipeline):**
 
 | Format | libFLAC in classpath? | Decoder used | Output encoding | Float math? |
 |--------|----------------------|-------------|----------------|-------------|
