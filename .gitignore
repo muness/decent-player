@@ -36,6 +36,10 @@ desktop.ini
 # Local config
 CLAUDE.md
 
+# Secrets / credentials
+.env
+debug-secrets.properties
+
 # Captures / dumps
 *_capture*.txt
 *_logcat*.txt

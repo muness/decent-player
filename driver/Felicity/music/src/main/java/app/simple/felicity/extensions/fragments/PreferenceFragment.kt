@@ -909,7 +909,20 @@ abstract class PreferenceFragment : MediaFragment() {
                 }
         )
 
-        // ── DEBUG: HTTP streaming test (temporary — remove before release) ──
+        // ── DEBUG: streaming tests (temporary — remove before release) ──
+        // Reads credentials from debug-secrets.properties (gitignored)
+        val debugSecrets = try {
+            java.util.Properties().apply {
+                java.io.File("/data/local/tmp/debug-secrets.properties").inputStream().use { load(it) }
+            }
+        } catch (_: Exception) {
+            try {
+                java.util.Properties().apply {
+                    requireContext().assets.open("debug-secrets.properties").use { load(it) }
+                }
+            } catch (_: Exception) { null }
+        }
+
         val debugHeader = Preference(type = PreferenceType.SUB_HEADER, title = R.string.filters)
         val httpStreamTest = Preference(
                 title = R.string.debug_http_stream,
@@ -917,14 +930,38 @@ abstract class PreferenceFragment : MediaFragment() {
                 icon = R.drawable.ic_refresh,
                 type = PreferenceType.DIALOG,
                 onPreferenceAction = { _, _ ->
-                    val url = "http://127.0.0.1:58432/test-track.flac"
+                    val host = debugSecrets?.getProperty("DEBUG_HTTP_HOST") ?: "127.0.0.1"
+                    val port = debugSecrets?.getProperty("DEBUG_HTTP_PORT") ?: "58432"
+                    val url = "http://$host:$port/test-track.flac"
                     app.simple.felicity.engine.services.FelicityPlayerService.instance?.debugPlayHttpUrl(url)
                         ?: Toast.makeText(requireContext(), "Service not running", Toast.LENGTH_SHORT).show()
                     Toast.makeText(requireContext(), "HTTP FLAC stream → playing", Toast.LENGTH_SHORT).show()
                 }
         )
+        val sftpStreamTest = Preference(
+                title = R.string.debug_sftp_stream,
+                summary = R.string.debug_sftp_stream_summary,
+                icon = R.drawable.ic_refresh,
+                type = PreferenceType.DIALOG,
+                onPreferenceAction = { _, _ ->
+                    val host = debugSecrets?.getProperty("DEBUG_SFTP_HOST") ?: ""
+                    val user = debugSecrets?.getProperty("DEBUG_SFTP_USER") ?: ""
+                    val pass = debugSecrets?.getProperty("DEBUG_SFTP_PASS") ?: ""
+                    val path = debugSecrets?.getProperty("DEBUG_SFTP_MUSIC_PATH") ?: ""
+                    if (host.isEmpty() || user.isEmpty()) {
+                        Toast.makeText(requireContext(), "Push debug-secrets.properties to /data/local/tmp/", Toast.LENGTH_LONG).show()
+                        return@Preference
+                    }
+                    val url = "sftp://$user:$pass@$host$path/Scorpions%20-%20Acoustica%20%282011%29%20%5BFLAC%5D/01%20The%20Zoo.flac"
+                    app.simple.felicity.engine.services.FelicityPlayerService.instance?.debugPlayHttpUrl(url)
+                        ?: Toast.makeText(requireContext(), "Service not running", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), "SFTP stream → playing", Toast.LENGTH_SHORT).show()
+                }
+        )
+
         preferences.add(debugHeader)
         preferences.add(httpStreamTest)
+        preferences.add(sftpStreamTest)
         // ── END DEBUG ──
 
         preferences.add(shuffleHeader)

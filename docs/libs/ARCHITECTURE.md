@@ -165,21 +165,21 @@ ExoPlayer remains active for playlist management, media session (lock screen, no
                     │   resolveTrackPath(uri)      │
                     └──────────┬──────────────────┘
                                │
-              ┌────────────────┼────────────────┐
-              │                │                │
-        file:// / bare   content://        http(s)://
-        path to .flac    MediaStore        streaming
-              │                │                │
-              ▼                ▼                ▼
-      NativeAudioEngine  NativeAudioEngine  ExoPlayer Pipeline
-      (C++ thread)       (via fd)           (Path 1 or 2)
+         ┌────────────────┼────────────────────────┐
+         │                │                        │
+   file:// / bare   content://         http(s):// / sftp:// / ftp://
+   path to .flac    MediaStore         streaming / seedbox
+         │                │                        │
+         ▼                ▼                        ▼
+ NativeAudioEngine  NativeAudioEngine      ExoPlayer Pipeline
+ (C++ thread)       (via fd)               (VfsDataSource or default)
               │                │                │
               └────────────────┴────────────────┘
                                │
                            USB DAC
 ```
 
-All paths deliver bit-perfect audio. The routing is fully automatic and transparent to the integrating app. HTTP/HTTPS streams (incl. seedbox) use the ExoPlayer pipeline with FlacExtractor or FFmpeg — no configuration needed.
+All paths deliver bit-perfect audio. The routing is fully automatic and transparent to the integrating app. HTTP/HTTPS streams and SFTP/FTP (seedbox) use the ExoPlayer pipeline with FlacExtractor or FFmpeg. SFTP/FTP is handled by the built-in `VfsDataSource` (Apache Commons VFS) via `DecentDataSourceFactory`.
 
 ## Modules
 

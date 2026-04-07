@@ -396,8 +396,13 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
             currentUsbSink?.isNativeEngineActive == true
         }
 
-        // Build new player instance
+        // Build new player instance with SFTP/FTP support via DecentDataSourceFactory
+        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+            com.decent.usbaudio.media3.DecentDataSourceFactory(this)
+        )
+
         player = ExoPlayer.Builder(this, renderersFactory!!)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -649,7 +654,12 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
             currentUsbSink?.isNativeEngineActive == true
         }
 
+        val mediaSourceFactory2 = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+            com.decent.usbaudio.media3.DecentDataSourceFactory(this)
+        )
+
         player = ExoPlayer.Builder(this, renderersFactory!!)
+            .setMediaSourceFactory(mediaSourceFactory2)
             .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
