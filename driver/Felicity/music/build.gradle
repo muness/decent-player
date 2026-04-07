@@ -82,6 +82,9 @@ android {
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
 
+    // JSch for SFTP network browser
+    implementation 'com.github.mwiede:jsch:0.2.23'
+
     implementation project(':theme')
     implementation project(':decorations')
     implementation project(':preferences')

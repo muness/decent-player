@@ -90,7 +90,8 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
     lateinit var songStatRepository: SongStatRepository
 
     private var mediaSession: MediaLibrarySession? = null
-    private lateinit var player: ExoPlayer
+    lateinit var player: ExoPlayer
+        private set
     private var renderersFactory: DefaultRenderersFactory? = null
     private var currentUsbSink: com.decent.usbaudio.media3.UsbAudioSink? = null
 

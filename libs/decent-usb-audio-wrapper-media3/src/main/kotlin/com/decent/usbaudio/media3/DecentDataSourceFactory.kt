@@ -8,7 +8,7 @@ import androidx.media3.datasource.DefaultDataSource
 
 /**
  * Composite [DataSource.Factory] that routes between:
- * - [VfsDataSource] for `sftp://`, `ftp://`, `ftps://` URIs
+ * - [SftpDataSource] for `sftp://`, `ftp://`, `ftps://` URIs
  * - [DefaultDataSource] for everything else (`file://`, `content://`, `http://`, `https://`)
  *
  * Usage with ExoPlayer:
@@ -24,7 +24,7 @@ import androidx.media3.datasource.DefaultDataSource
 class DecentDataSourceFactory(context: Context) : DataSource.Factory {
 
     private val defaultFactory = DefaultDataSource.Factory(context)
-    private val vfsFactory = VfsDataSource.Factory()
+    private val vfsFactory = SftpDataSource.Factory()
 
     override fun createDataSource(): DataSource {
         // Returns a routing DataSource that delegates based on URI scheme
@@ -43,7 +43,7 @@ class DecentDataSourceFactory(context: Context) : DataSource.Factory {
 
         @OptIn(UnstableApi::class)
         override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
-            val source = if (VfsDataSource.supportsUri(dataSpec.uri)) vfsSource else defaultSource
+            val source = if (SftpDataSource.supportsUri(dataSpec.uri)) vfsSource else defaultSource
             activeSource = source
             return source.open(dataSpec)
         }

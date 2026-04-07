@@ -25,8 +25,6 @@ dependencies {
     implementation("androidx.media3:media3-common:1.9.3")
     implementation("androidx.media3:media3-datasource:1.9.3")
 
-    // Apache Commons VFS for SFTP/FTP streaming support
-    implementation("org.apache.commons:commons-vfs2:2.10.0")
-    // JSch fork (maintained) — required by Commons VFS for SFTP
+    // JSch fork (maintained) — SFTP streaming with native offset seek
     implementation("com.github.mwiede:jsch:0.2.23")
 }
