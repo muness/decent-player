@@ -223,6 +223,13 @@
     <string name="skip_hidden_files_summary">Exclude dot-prefixed audio files (e.g. .song.mp3) from the library scan.</string>
     <string name="skip_hidden_folders">Skip Hidden Folders</string>
     <string name="skip_hidden_folders_summary">Exclude dot-prefixed directories (e.g. .music/) and their contents from the library scan.</string>
+    <string name="hide_dsd">Hide DSD Files</string>
+    <string name="hide_dsd_summary">Exclude DSD files (.dsf, .dff) from the library. DSD playback is not yet supported.</string>
+    <string name="scan_library">Scan Library</string>
+    <string name="scan_library_summary">Scan all storage for audio files and update the library database.</string>
+    <string name="scanning_library">Scanning library…</string>
+    <string name="scan_complete">Scan complete</string>
+    <string name="no_music_found">No music found. Go to Settings → Library and run a manual scan.</string>
     <string name="paste_lyrics_here">Paste Lyrics Here</string>
     <string name="save">Save</string>
     <string name="volume">Volume</string>

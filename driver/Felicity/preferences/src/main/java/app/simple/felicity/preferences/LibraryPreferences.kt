@@ -64,6 +64,18 @@ object LibraryPreferences {
 
     // ----------------------------------------------------------------------------------------------------- //
 
+    const val SKIP_DSD = "skip_dsd_files"
+
+    fun isSkipDsd(): Boolean {
+        return SharedPreferences.getSharedPreferences().getBoolean(SKIP_DSD, true)
+    }
+
+    fun setSkipDsd(skip: Boolean) {
+        SharedPreferences.getSharedPreferences().edit { putBoolean(SKIP_DSD, skip) }
+    }
+
+    // ----------------------------------------------------------------------------------------------------- //
+
     fun isUseMediaStoreArtwork(): Boolean {
         return SharedPreferences.getSharedPreferences().getBoolean(USE_MEDIASTORE_ARTWORK, true)
     }

@@ -49,16 +49,15 @@ class UsbAudioSink(
     var isNativeEngineActive: Boolean = false
         private set
 
-    /** True whenever a native engine EXISTS (created, not yet destroyed).
-     *  Unlike [isNativeEngineActive], this is NOT toggled during seek.
-     *  Used to pause the metadata scanner during playback. */
-    @Volatile
-    var hasNativeEngine: Boolean = false
-        private set
 
     /** File path of the current track. Set by the app on each track transition.
      *  When non-null and pointing to a FLAC file, the native audio engine is used. */
     var currentTrackPath: String? = null
+
+    /** Called when the native engine finishes playing (EOF).
+     *  The host must call player.seekToNext() because ExoPlayer's renderer
+     *  never reaches outputStreamEnded when LoadControl blocks loading. */
+    var onNativeEngineFinished: (() -> Unit)? = null
 
     /** Call from FelicityPlayerService.onMediaItemTransition to clean up a finished engine.
      *  @return true if an engine was cleaned up (caller should restart playback). */
@@ -351,6 +350,8 @@ class UsbAudioSink(
 
     private var posLogCount = 0L
 
+    private var engineEndNotified = false
+
     override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
         if (config.bitPerfectEnabled) {
             val streamAlive = usbAudioStream?.isAlive == true
@@ -359,7 +360,16 @@ class UsbAudioSink(
 
             if (++posLogCount % 500 == 1L) {
                 Log.i(TAG, "getPositionUs: streamAlive=$streamAlive engine=$engineCreated " +
-                        "window=$windowOffsetUs enginePos=${engine?.getPositionUs()}")
+                        "running=${engine?.isRunning} window=$windowOffsetUs enginePos=${engine?.getPositionUs()}")
+            }
+
+            // Detect engine finished — notify host to transition to next track.
+            // ExoPlayer's renderer never reaches outputStreamEnded because
+            // LoadControl blocked loading, so we must trigger the skip externally.
+            if (engine != null && !engine.isRunning && !engineEndNotified) {
+                engineEndNotified = true
+                Log.i(TAG, "Engine finished — notifying host for track transition")
+                onNativeEngineFinished?.invoke()
             }
 
             // Native engine: absolute FLAC position + window offset
@@ -384,7 +394,10 @@ class UsbAudioSink(
             val engine = nativeEngine
             // Engine still running → not ended
             if (engine != null && engine.isRunning) return false
-            // Engine finished or null → delegate to super (which checks playToEndOfStream)
+            // Engine exists but stopped → it finished (EOF). Signal ended directly.
+            // Cannot delegate to super because LoadControl blocked ExoPlayer's loading,
+            // so the delegate never reached end-of-stream on its own.
+            if (engine != null && !engine.isRunning) return true
         }
         return super.isEnded()
     }
@@ -615,8 +628,8 @@ class UsbAudioSink(
                         engine.pause()
                         nativeEngine = engine
                         isNativeEngineActive = true
-                        hasNativeEngine = true
                         engineNeedsInitialSeek = true
+                        engineEndNotified = false
                         activeEnginePath = path
                         Log.i(TAG, "Native FLAC engine started (paused, awaiting seek) for: ${File(path).name}")
                         return

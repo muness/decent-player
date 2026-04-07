@@ -100,6 +100,28 @@
             </HorizontalScrollView>
 
             <LinearLayout
+                android:id="@+id/empty_library_banner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="@dimen/padding_20"
+                android:layout_marginHorizontal="@dimen/padding_20"
+                android:layout_marginTop="@dimen/padding_20"
+                android:alpha="0.8"
+                android:visibility="gone">
+
+                <app.simple.felicity.decorations.typeface.TypeFaceTextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/no_music_found"
+                    android:textSize="@dimen/text_size_16"
+                    android:gravity="center"
+                    app:appFontStyle="medium"
+                    app:textColorStyle="secondary" />
+
+            </LinearLayout>
+
+            <LinearLayout
                 android:id="@+id/recommended_section"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

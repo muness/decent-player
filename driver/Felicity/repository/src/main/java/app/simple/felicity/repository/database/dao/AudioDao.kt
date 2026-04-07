@@ -168,6 +168,14 @@ interface AudioDao {
     @Update
     suspend fun update(audioList: List<Audio>)
 
+    /** Hide all DSD files (set isAvailable=false for .dsf/.dff/.dsd) */
+    @Query("UPDATE audio SET is_available = 0 WHERE mimeType IN ('dsf', 'dff', 'dsd')")
+    suspend fun hideDsdFiles()
+
+    /** Show all DSD files (set isAvailable=true for .dsf/.dff/.dsd) */
+    @Query("UPDATE audio SET is_available = 1 WHERE mimeType IN ('dsf', 'dff', 'dsd')")
+    suspend fun showDsdFiles()
+
     /**
      * Delete the entire table
      */

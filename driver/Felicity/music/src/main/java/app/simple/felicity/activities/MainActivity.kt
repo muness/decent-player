@@ -215,6 +215,24 @@ class MainActivity : BaseActivity(), MiniPlayerCallbacks {
     }
 
     fun showHome() {
+        // Check for empty library and show hint on first use
+        lifecycleScope.launch {
+            val count = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    app.simple.felicity.repository.database.instances.AudioDatabase
+                        .getInstance(applicationContext).audioDao()
+                        ?.getAllAudioList()?.size ?: 0
+                } catch (_: Exception) { 0 }
+            }
+            if (count == 0) {
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    R.string.no_music_found,
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
         when (UserInterfacePreferences.getHomeInterface()) {
             UserInterfacePreferences.HOME_INTERFACE_DASHBOARD -> {
                 supportFragmentManager.beginTransaction()
@@ -340,16 +358,33 @@ class MainActivity : BaseActivity(), MiniPlayerCallbacks {
         binding.miniPlayer.makeOpaque(animated = true)
     }
 
+    private var lastVolumeToastTime = 0L
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (AudioPreferences.isBitPerfectUsbEnabled()) {
+                val now = System.currentTimeMillis()
+                if (now - lastVolumeToastTime > 3000) {
+                    android.widget.Toast.makeText(this,
+                        "Volume control disabled — bit-perfect mode active",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    lastVolumeToastTime = now
+                }
+                return true // consume the event
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onStart() {
         super.onStart()
-        // TEMPORARILY DISABLED for SD card I/O testing
-        // startAudioDatabaseService()
+        // Scan is manual-only (Settings → Library → Scan Library).
+        // Automatic scanning caused SD card I/O contention with playback.
     }
 
     override fun onResume() {
         super.onResume()
-        // TEMPORARILY DISABLED for SD card I/O testing
-        // AudioDatabaseService.startScan(applicationContext)
     }
 
     override fun onStop() {

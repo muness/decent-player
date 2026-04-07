@@ -211,8 +211,15 @@ public class JAudioMetadataLoader {
         return audioFile.getAudioHeader().getBitsPerSample();
     }
     
-    private long generateId
-            () {
-        return FileUtils.INSTANCE.generateXXHash64(file, Integer.MAX_VALUE);
+    private long generateId() {
+        // Fast hash from path + size + modified time.
+        // Avoids reading the entire file (which was 100+ MB per FLAC through FUSE).
+        String identity = file.getAbsolutePath() + "|" + file.length() + "|" + file.lastModified();
+        long hash = 0xcbf29ce484222325L; // FNV-1a offset basis
+        for (int i = 0; i < identity.length(); i++) {
+            hash ^= identity.charAt(i);
+            hash *= 0x100000001b3L; // FNV-1a prime
+        }
+        return hash;
     }
 }

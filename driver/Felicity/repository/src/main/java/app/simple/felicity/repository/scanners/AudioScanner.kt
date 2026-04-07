@@ -31,8 +31,11 @@ class AudioScanner() {
                 "ape", // Monkey's Audio
                 "dsd", // Direct Stream Digital
                 "pcm", // Pulse-Code Modulation
-                "dsf" // DSD Stream File
+                "dsf", // DSD Stream File
+                "dff" // DSD Interchange File Format
         )
+
+        private val DSD_EXTENSIONS = hashSetOf("dsf", "dff", "dsd")
     }
 
     fun getAudioFiles(root: File): List<File> {
@@ -47,21 +50,25 @@ class AudioScanner() {
         val skipNomedia = LibraryPreferences.isSkipNomedia()
         val skipHiddenFiles = LibraryPreferences.isSkipHiddenFiles()
         val skipHiddenFolders = LibraryPreferences.isSkipHiddenFolders()
+        val skipDsd = LibraryPreferences.isSkipDsd()
 
-        return collectAudio(root, skipNomedia, skipHiddenFiles, skipHiddenFolders)
+        return collectAudio(root, skipNomedia, skipHiddenFiles, skipHiddenFolders, skipDsd)
     }
 
-    private fun File.isAudioFile(): Boolean {
-        val ext = extension
+    private fun File.isAudioFile(skipDsd: Boolean): Boolean {
+        val ext = extension.lowercase()
         if (ext.isEmpty()) return false
-        return AUDIO_EXTENSIONS.contains(ext.lowercase())
+        if (!AUDIO_EXTENSIONS.contains(ext)) return false
+        if (skipDsd && DSD_EXTENSIONS.contains(ext)) return false
+        return true
     }
 
     private fun collectAudio(
             root: File,
             skipNomedia: Boolean,
             skipHiddenFiles: Boolean,
-            skipHiddenFolders: Boolean
+            skipHiddenFolders: Boolean,
+            skipDsd: Boolean
     ): List<File> {
         val result = mutableListOf<File>()
 
@@ -78,7 +85,7 @@ class AudioScanner() {
                 return@onEnter true
             }
             .forEach { file ->
-                if (file.isFile && file.length() > 0 && file.isAudioFile()) {
+                if (file.isFile && file.length() > 0 && file.isAudioFile(skipDsd)) {
                     if (skipHiddenFiles && file.name.startsWith(".")) {
                         Log.d(TAG, "Skipping hidden file: ${file.absolutePath}")
                         return@forEach

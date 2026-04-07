@@ -25,6 +25,9 @@ import app.simple.felicity.decorations.utils.TextViewUtils.setTextWithEffect
 import app.simple.felicity.extensions.fragments.MediaFragment
 import app.simple.felicity.repository.managers.MediaManager
 import app.simple.felicity.repository.models.Audio
+import android.util.Log
+import android.widget.Toast
+import app.simple.felicity.repository.database.instances.AudioDatabase
 import app.simple.felicity.shared.utils.ViewUtils.gone
 import app.simple.felicity.shared.utils.ViewUtils.visible
 import app.simple.felicity.ui.panels.Albums
@@ -89,6 +92,7 @@ class Dashboard : MediaFragment() {
         setupPanelsGrid()
         setupCarouselSpacing()
         observeData()
+        checkEmptyLibrary()
 
         binding.scrollView.requireAttachedMiniPlayer()
 
@@ -226,23 +230,59 @@ class Dashboard : MediaFragment() {
         binding.recommendedSection.visible(false)
     }
 
+    /**
+     * Check if the audio database is empty and show a hint banner.
+     * Runs a quick DB query on IO dispatcher, then updates UI on Main.
+     */
+    private fun checkEmptyLibrary() {
+        Log.i("Dashboard", "checkEmptyLibrary: starting query...")
+        viewLifecycleOwner.lifecycleScope.launch {
+            val count = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val dao = AudioDatabase.getInstance(requireContext()).audioDao()
+                    Log.i("Dashboard", "checkEmptyLibrary: dao=$dao")
+                    val list = dao?.getAllAudioList()
+                    Log.i("Dashboard", "checkEmptyLibrary: list size=${list?.size}")
+                    list?.size ?: 0
+                } catch (e: Exception) {
+                    Log.e("Dashboard", "checkEmptyLibrary: exception", e)
+                    0
+                }
+            }
+            Log.i("Dashboard", "checkEmptyLibrary: count=$count, showing banner=${count == 0}")
+            if (count == 0) {
+                binding.emptyLibraryBanner.visibility = android.view.View.VISIBLE
+                Log.i("Dashboard", "checkEmptyLibrary: banner set to VISIBLE")
+            } else {
+                binding.emptyLibraryBanner.visibility = android.view.View.GONE
+                Log.i("Dashboard", "checkEmptyLibrary: banner set to GONE")
+            }
+        }
+    }
+
     private fun observeData() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     dashboardViewModel.recommended.collect { data ->
-                        if (data != null) setupRecommendedGrid(data)
+                        if (data != null) {
+                            setupRecommendedGrid(data)
+                            // Hide banner once data arrives
+                            binding.emptyLibraryBanner.gone()
+                        }
                         else binding.recommendedSection.gone()
                     }
                 }
                 launch {
                     dashboardViewModel.recentlyPlayed.collect { songs ->
                         updateRecentlyPlayed(songs)
+                        if (songs.isNotEmpty()) binding.emptyLibraryBanner.gone()
                     }
                 }
                 launch {
                     dashboardViewModel.recentlyAdded.collect { songs ->
                         updateRecentlyAdded(songs)
+                        if (songs.isNotEmpty()) binding.emptyLibraryBanner.gone()
                     }
                 }
                 launch {

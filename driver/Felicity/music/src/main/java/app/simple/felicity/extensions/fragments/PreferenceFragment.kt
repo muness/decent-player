@@ -22,6 +22,17 @@ import app.simple.felicity.preferences.AppearancePreferences
 import app.simple.felicity.preferences.AudioPreferences
 import app.simple.felicity.preferences.BehaviourPreferences
 import app.simple.felicity.preferences.LibraryPreferences
+import app.simple.felicity.repository.services.AudioDatabaseService
+import app.simple.felicity.repository.loader.AudioDatabaseLoader
+import android.app.AlertDialog
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.Toast
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import app.simple.felicity.preferences.ListPreferences
 import app.simple.felicity.preferences.ShufflePreferences
 import app.simple.felicity.preferences.UserInterfacePreferences
@@ -781,6 +792,16 @@ abstract class PreferenceFragment : MediaFragment() {
 
         val scannerHeader = Preference(type = PreferenceType.SUB_HEADER, title = R.string.scanner)
 
+        val scanLibrary = Preference(
+                title = R.string.scan_library,
+                summary = R.string.scan_library_summary,
+                icon = R.drawable.ic_refresh,
+                type = PreferenceType.DIALOG,
+                onPreferenceAction = { _, _ ->
+                    showScanProgressDialog()
+                }
+        )
+
         val minimumAudioLength = Preference(
                 title = R.string.minimum_audio_length,
                 summary = R.string.minimum_audio_length_summary,
@@ -829,6 +850,26 @@ abstract class PreferenceFragment : MediaFragment() {
 
         val filtersHeader = Preference(type = PreferenceType.SUB_HEADER, title = R.string.filters)
 
+        val hideDsdToggle = Preference(
+                title = R.string.hide_dsd,
+                summary = R.string.hide_dsd_summary,
+                icon = R.drawable.ic_filter,
+                type = PreferenceType.SWITCH,
+                onPreferenceAction = { view, callback ->
+                    val hide = (view as FelicitySwitch).isChecked
+                    LibraryPreferences.setSkipDsd(hide)
+                    // Apply retroactively to already-scanned DSD files
+                    viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                        val dao = app.simple.felicity.repository.database.instances.AudioDatabase
+                            .getInstance(requireContext()).audioDao()
+                        if (hide) dao?.hideDsdFiles() else dao?.showDsdFiles()
+                    }
+                },
+                valueProvider = Supplier {
+                    LibraryPreferences.isSkipDsd()
+                }
+        )
+
         val skipNomediaToggle = Preference(
                 title = R.string.skip_nomedia_folders,
                 summary = R.string.skip_nomedia_folders_summary,
@@ -873,14 +914,103 @@ abstract class PreferenceFragment : MediaFragment() {
         preferences.add(albumArtHeader)
         preferences.add(mediaStoreArt)
         preferences.add(scannerHeader)
+        preferences.add(scanLibrary)
         preferences.add(minimumAudioLength)
         preferences.add(minimumAudioSize)
         preferences.add(filtersHeader)
+        preferences.add(hideDsdToggle)
         preferences.add(skipNomediaToggle)
         preferences.add(skipHiddenFilesToggle)
         preferences.add(skipHiddenFoldersToggle)
 
         return preferences
+    }
+
+    /**
+     * Show a blocking progress dialog while the library scan runs.
+     * Non-cancelable, real progress bar, auto-dismisses when done.
+     */
+    private fun showScanProgressDialog() {
+        val ctx = context ?: return
+
+        val countView = android.widget.TextView(ctx).apply {
+            text = getString(R.string.scanning_library)
+            setPadding(64, 32, 64, 0)
+            textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val statusView = android.widget.TextView(ctx).apply {
+            text = ""
+            setPadding(64, 8, 64, 0)
+            textSize = 13f
+            alpha = 0.7f
+        }
+        val progressBar = ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            setPadding(64, 16, 64, 32)
+        }
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(countView)
+            addView(statusView)
+            addView(progressBar)
+        }
+
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle(R.string.scan_library)
+            .setView(layout)
+            .setCancelable(false)
+            .create()
+
+        dialog.show()
+
+        // Start the scan
+        AudioDatabaseService.refreshScan(ctx)
+
+        // Poll scan state and update real progress
+        viewLifecycleOwner.lifecycleScope.launch {
+            delay(300) // wait for scan to start
+            while (AudioDatabaseLoader.scanRunning) {
+                val total = AudioDatabaseLoader.scanTotalFiles
+                val done = AudioDatabaseLoader.scanProcessedFiles
+                val toExtract = AudioDatabaseLoader.scanToExtract
+                val extracted = AudioDatabaseLoader.scanExtracted
+                withContext(Dispatchers.Main) {
+                    if (toExtract > 0 && extracted < toExtract) {
+                        // Phase 2: extracting metadata from new/changed files
+                        countView.text = "Extracting: $extracted / $toExtract"
+                        statusView.text = "${total - toExtract} unchanged, $toExtract new"
+                        if (progressBar.isIndeterminate) progressBar.isIndeterminate = false
+                        progressBar.max = toExtract
+                        progressBar.progress = extracted
+                    } else if (total > 0) {
+                        // Phase 1: checking files, or phase 2 done
+                        countView.text = "$done / $total"
+                        statusView.text = AudioDatabaseLoader.scanStatusMessage
+                        if (progressBar.isIndeterminate) progressBar.isIndeterminate = false
+                        progressBar.max = total
+                        progressBar.progress = done
+                    } else {
+                        countView.text = getString(R.string.scanning_library)
+                        statusView.text = AudioDatabaseLoader.scanStatusMessage
+                    }
+                }
+                delay(200)
+            }
+            // Final state
+            val total = AudioDatabaseLoader.scanTotalFiles
+            val extracted = AudioDatabaseLoader.scanExtracted
+            val skipped = total - AudioDatabaseLoader.scanToExtract
+            withContext(Dispatchers.Main) {
+                countView.text = getString(R.string.scan_complete)
+                statusView.text = "$total files: $extracted processed, $skipped unchanged"
+                progressBar.isIndeterminate = false
+                progressBar.max = 1
+                progressBar.progress = 1
+                delay(2000)
+                if (dialog.isShowing) dialog.dismiss()
+            }
+        }
     }
 
     protected fun createAccessibilityPanel(): List<Preference> {

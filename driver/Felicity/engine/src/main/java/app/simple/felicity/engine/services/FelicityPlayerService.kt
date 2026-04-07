@@ -28,7 +28,6 @@ import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import com.decent.usbaudio.media3.NativeEngineAwareLoadControl
-import app.simple.felicity.repository.loader.AudioDatabaseLoader
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -263,6 +262,19 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                 return if (AudioPreferences.isBitPerfectUsbEnabled()) {
                     com.decent.usbaudio.media3.UsbAudioSink(audioSink, context).also {
                         currentUsbSink = it
+                        it.onNativeEngineFinished = {
+                            // Native engine reached EOF. ExoPlayer's renderer never
+                            // reaches outputStreamEnded (LoadControl blocked loading),
+                            // so we must skip to next track externally.
+                            Log.i(TAG, "Native engine EOF — skipping to next track")
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                if (player.hasNextMediaItem()) {
+                                    player.seekToNextMediaItem()
+                                } else {
+                                    player.pause()
+                                }
+                            }
+                        }
                     }
                 } else {
                     currentUsbSink = null
@@ -706,9 +718,6 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            // Pause/resume metadata scanner based on native engine state
-            AudioDatabaseLoader.playbackActive = currentUsbSink?.isNativeEngineActive == true && isPlaying
-
             val format = player.audioFormat
             if (format != null && format.pcmEncoding != C.ENCODING_INVALID) {
                 val encodingName = when (format.pcmEncoding) {
@@ -886,9 +895,6 @@ class FelicityPlayerService : MediaLibraryService(), SharedPreferences.OnSharedP
                         // Create engine NOW with correct path (not lazy in handleBuffer
                         // which fires before path is updated)
                         usbSink.createEngineIfNeeded()
-                        // Pause metadata scanner while native engine plays — prevents
-                        // SD card FUSE I/O contention that causes playback stalls.
-                        AudioDatabaseLoader.playbackActive = usbSink.isNativeEngineActive
                         Log.d(TAG, "Bit depth set sync: ${audio.bitPerSample}-bit for ${audio.title}, path=${audio.path}")
                     }
                     if (engineFinished) {

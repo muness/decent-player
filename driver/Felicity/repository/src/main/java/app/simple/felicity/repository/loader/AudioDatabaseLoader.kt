@@ -34,11 +34,21 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
         private const val MIN_SEMAPHORE_PERMITS = 4
         private const val BATCH_SIZE = 50 // Number of audio items to accumulate before inserting to database
 
-        /** Set true to pause the scanner while native audio engine is playing.
-         *  Prevents SD card I/O contention through FUSE. */
-        @Volatile
-        @JvmStatic
-        var playbackActive: Boolean = false
+        /** Observable scan state for UI (progress dialog). */
+        @Volatile @JvmStatic var scanRunning: Boolean = false
+            private set
+        @Volatile @JvmStatic var scanStatusMessage: String = ""
+            private set
+        @Volatile @JvmStatic var scanTotalFiles: Int = 0
+            private set
+        @Volatile @JvmStatic var scanProcessedFiles: Int = 0
+            private set
+        /** How many files needed metadata extraction (not skipped). */
+        @Volatile @JvmStatic var scanToExtract: Int = 0
+            private set
+        /** How many metadata extractions completed so far. */
+        @Volatile @JvmStatic var scanExtracted: Int = 0
+            private set
 
         data class IndexedFile(val lastModified: Long, val size: Long, val id: Long = 0L, val isFavorite: Boolean = false, val alwaysSkip: Boolean = false)
     }
@@ -80,6 +90,12 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
         }
 
         try {
+            scanRunning = true
+            scanTotalFiles = 0
+            scanProcessedFiles = 0
+            scanToExtract = 0
+            scanExtracted = 0
+            scanStatusMessage = "Starting scan..."
             val startTime = System.currentTimeMillis()
             Log.i(TAG, "SCAN START ════════════════════════════════════════")
             val storages = RemovableStorageDetector.getAllStorageVolumes(context)
@@ -87,6 +103,15 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
 
             Log.d(TAG, "Reconciling database with current storage state...")
             reconcileDatabase(storages)
+
+            // Apply DSD visibility filter retroactively
+            if (LibraryPreferences.isSkipDsd()) {
+                dao?.hideDsdFiles()
+                Log.i(TAG, "DSD files hidden (preference active)")
+            } else {
+                dao?.showDsdFiles()
+                Log.i(TAG, "DSD files shown (preference inactive)")
+            }
 
             Log.d(TAG, "Indexing existing audio files in the database...")
             // Single pass: build both the change-detection index and the path→id lookup map.
@@ -128,6 +153,8 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                 val audioFiles = AudioScanner().getAudioFiles(storagePath)
                 totalFiles += audioFiles.size
                 Log.i(TAG, "SCAN [$storageLabel] Found ${audioFiles.size} audio files in $pathStr")
+                scanTotalFiles += audioFiles.size
+                scanStatusMessage = "Found $scanTotalFiles files..."
 
                 var storageProcessed = 0
                 var storageSkipped = 0
@@ -136,16 +163,10 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                     // Check for cancellation before processing each file
                     scanScope.coroutineContext.ensureActive()
 
-                    // Yield to playback: pause scanning while native engine is active.
-                    // SD card FUSE I/O from scanning competes with playback decode.
-                    while (playbackActive) {
-                        kotlinx.coroutines.delay(500)
-                        scanScope.coroutineContext.ensureActive()
-                    }
-
                     if (shouldProcess(file)) {
                         storageProcessed++
                         totalToProcess++
+                        scanToExtract++
                         val processingJob = scanScope.launch {
                             semaphore.acquire()
                             try {
@@ -204,12 +225,14 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                                     }
                                 }
                             } catch (e: CancellationException) {
-                                // Coroutine was canceled - rethrow to propagate cancellation
                                 Log.d(TAG, "Processing canceled for: ${file.name}")
                                 throw e
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error processing ${file.absolutePath}", e)
                             } finally {
+                                scanExtracted++
+                                scanProcessedFiles++
+                                scanStatusMessage = "Extracting metadata: $scanExtracted / $scanToExtract"
                                 semaphore.release()
                             }
                         }
@@ -220,6 +243,7 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                     } else {
                         storageSkipped++
                         totalSkipped++
+                        scanProcessedFiles++
                     }
                 }
 
@@ -227,6 +251,7 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
             }
 
             Log.i(TAG, "SCAN TOTAL: ${totalFiles} files, ${totalToProcess} to process, ${totalSkipped} skipped")
+            scanStatusMessage = "Processing $totalToProcess files ($totalSkipped unchanged)..."
 
             // Wait for all processing jobs to complete
             val jobsToWait = synchronized(activeJobs) { activeJobs.toList() }
@@ -245,14 +270,19 @@ class AudioDatabaseLoader @Inject constructor(private val context: Context) {
                 updateBatchList.clear()
             }
 
-            Log.i(TAG, "SCAN COMPLETE ═══════════════════════════════════ (${(System.currentTimeMillis() - startTime) / 1000}s)")
+            val elapsed = (System.currentTimeMillis() - startTime) / 1000
+            scanStatusMessage = "Done: $totalToProcess processed, $totalSkipped unchanged (${elapsed}s)"
+            Log.i(TAG, "SCAN COMPLETE ═══════════════════════════════════ (${elapsed}s)")
         } catch (e: CancellationException) {
-            // Scan was canceled - this is expected behavior
+            scanStatusMessage = "Scan canceled"
             Log.d(TAG, "Audio file processing canceled")
             throw e  // Rethrow to propagate cancellation
         } catch (e: Exception) {
+            scanStatusMessage = "Scan error: ${e.message}"
             Log.e(TAG, "Error during audio file processing", e)
         } finally {
+            scanRunning = false
+
             // Clear active jobs after completion
             synchronized(activeJobs) {
                 activeJobs.clear()

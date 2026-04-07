@@ -80,12 +80,14 @@ class NativeAudioEngine {
         return nativeSeek(handle, positionUs)
     }
 
-    /** Stop the decode thread (blocks until thread exits). */
+    /** Stop the decode thread (blocks until thread exits). Thread-safe. */
+    @Synchronized
     fun stop() {
         if (handle != 0L) nativeStop(handle)
     }
 
-    /** Destroy the engine and free all native resources. */
+    /** Destroy the engine and free all native resources. Thread-safe / idempotent. */
+    @Synchronized
     fun destroy() {
         if (handle != 0L) {
             nativeDestroy(handle)

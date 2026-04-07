@@ -11,8 +11,6 @@ import app.simple.felicity.databinding.FragmentPreferenceAppearanceBinding
 import app.simple.felicity.databinding.HeaderPreferencesGenericBinding
 import app.simple.felicity.decorations.views.AppHeader
 import app.simple.felicity.extensions.fragments.PreferenceFragment
-import app.simple.felicity.preferences.LibraryPreferences
-import app.simple.felicity.repository.services.AudioDatabaseService
 
 class Library : PreferenceFragment() {
 
@@ -38,16 +36,8 @@ class Library : PreferenceFragment() {
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
         super.onSharedPreferenceChanged(sharedPreferences, key)
-        when (key) {
-            LibraryPreferences.MINIMUM_AUDIO_SIZE,
-            LibraryPreferences.MINIMUM_AUDIO_LENGTH,
-            LibraryPreferences.SKIP_NOMEDIA,
-            LibraryPreferences.SKIP_HIDDEN_FILES,
-            LibraryPreferences.SKIP_HIDDEN_FOLDERS -> {
-                // Any scanner-related preference change requires a fresh scan
-                AudioDatabaseService.refreshScan(requireContext())
-            }
-        }
+        // Scanner filter changes no longer trigger automatic scans.
+        // User must manually run "Scan Library" for changes to take effect.
     }
 
     override val wantsMiniPlayerVisible: Boolean
@@ -64,4 +54,3 @@ class Library : PreferenceFragment() {
         const val TAG = "Appearance"
     }
 }
-
