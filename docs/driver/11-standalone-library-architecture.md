@@ -1,6 +1,6 @@
 # 11 — Packaging the Driver as a Standalone Android Library
 
-**Purpose:** This document is the blueprint for extracting the bit-perfect USB audio driver from the [Felicity](https://github.com/Hamza417/Felicity) codebase into a **standalone, framework-agnostic Android library** that can be used by any app — including the future DecentPlayer app built from scratch.
+**Purpose:** This document captures the design of the standalone, framework-agnostic Android libraries that ship in `libs/`. The bit-perfect USB Audio driver was originally prototyped inside a fork of the [Felicity](https://github.com/Hamza417/Felicity) music player (now living in `driver/Felicity/` purely as a proof-of-concept harness); its core was then extracted into the three independent modules under `libs/` so that any Android app — including the future standalone `decent-player` application built from scratch — can consume it without taking on a dependency on Felicity.
 
 ---
 

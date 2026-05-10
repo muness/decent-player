@@ -923,8 +923,12 @@ abstract class PreferenceFragment : MediaFragment() {
                 icon = R.drawable.ic_folder,
                 type = PreferenceType.DIALOG,
                 onPreferenceAction = { _, _ ->
-                    val host = debugSecrets?.getProperty("DEBUG_HTTP_HOST") ?: "127.0.0.1"
-                    val port = debugSecrets?.getProperty("DEBUG_HTTP_PORT") ?: "58432"
+                    val host = debugSecrets?.getProperty("DEBUG_HTTP_HOST").orEmpty()
+                    val port = debugSecrets?.getProperty("DEBUG_HTTP_PORT").orEmpty()
+                    if (host.isEmpty() || port.isEmpty()) {
+                        Toast.makeText(requireContext(), "Push debug-secrets.properties to /data/local/tmp/", Toast.LENGTH_LONG).show()
+                        return@Preference
+                    }
                     val baseUri = "http://$host:$port"
                     openFragment(
                         app.simple.felicity.ui.panels.NetworkBrowser.newInstance(baseUri, "", "http"),

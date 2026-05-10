@@ -10,8 +10,8 @@ import android.util.Log
  * DAC via Linux usbdevfs isochronous transfers, bypassing the entire Android
  * audio stack (AudioFlinger, AudioTrack, AAudio).
  *
- * Pipeline: 64 URBs in flight, each carrying 8 ISO packets (1ms of audio).
- * Total pipeline buffer: ~64ms.
+ * Pipeline: 80 URBs in flight, each carrying 8 ISO packets (1 ms of audio).
+ * Total pipeline buffer: ~80 ms.
  *
  * Rate transition lifecycle (per USB Audio Class 2.0 spec, verified via xHCI ftrace):
  * ```

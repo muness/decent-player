@@ -1,3 +1,19 @@
+Felicity Music Player
+Copyright (C) Hamza Rizwan and the Felicity contributors
+Upstream: https://github.com/Hamza417/Felicity
+
+The directory containing this LICENSE file (driver/Felicity/) is a fork of the
+Felicity Music Player and is distributed under the GNU Affero General Public
+License version 3 (AGPL-3.0). Modifications by the decent-player project are
+limited to integrating the decent USB Audio driver libraries from libs/ for
+proof-of-concept testing.
+
+The AGPL-3.0 applies ONLY to driver/Felicity/. The libs/ directory and any
+other component of this repository carry their own license — see the top-level
+LICENSE file and NOTICE.md.
+
+--------------------------------------------------------------------------------
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

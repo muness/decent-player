@@ -22,7 +22,7 @@ FLAC file -> FFmpeg decoder -> PCM_FLOAT (/2^N) -> float->int32 (x2^N) -> USB
 FLAC file -> FlacExtractor (native) -> raw int PCM -> integer shift -> USB
 ```
 
-- Uses `com.decent:media3-decoder-flac` (built from xiph/flac source)
+- Uses `com.decent.usbaudio:decent-media3-decoder-flac` (built from xiph/flac source)
 - Decodes at the **extractor level** (FlacExtractor), before any renderer
 - With `enableFloatOutput=false`: delivers `PCM_16BIT` (16-bit source) or `PCM_32BIT` (24-bit source, sign-extended to int32)
 - The native USB driver pads to the DAC's bit depth using integer shift (`<< 8` or `<< 16`)
@@ -63,7 +63,7 @@ FLAC file -> NativeAudioEngine (C++ thread) -> FLACParser -> raw PCM -> integer 
 
 ## How it works with ExoPlayer
 
-When `com.decent:media3-decoder-flac` is in the classpath, ExoPlayer auto-detects it. The `FlacExtractor` from the libFLAC module decodes FLAC at the **extractor level** (before the renderer), delivering raw integer PCM directly. This happens automatically -- no configuration needed beyond adding the dependency.
+When `com.decent.usbaudio:decent-media3-decoder-flac` is in the classpath, ExoPlayer auto-detects it. The `FlacExtractor` from the libFLAC module decodes FLAC at the **extractor level** (before the renderer), delivering raw integer PCM directly. This happens automatically -- no configuration needed beyond adding the dependency.
 
 The `UsbAudioSink` handles both paths in `handleBuffer()`:
 - When it receives `PCM_FLOAT` data (FFmpeg path), it converts to `FloatArray` and calls `enqueue()`
@@ -79,8 +79,8 @@ When libFLAC is NOT in the classpath, ExoPlayer falls back to FFmpeg for FLAC de
 
 ```gradle
 dependencies {
-    implementation 'com.decent:usb-audio-driver:1.0.0'
-    implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
+    implementation 'com.decent.usbaudio:decent-usb-audio-driver:<version>'
+    implementation 'com.decent.usbaudio:decent-usb-audio-wrapper-media3:<version>'
     implementation 'org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1'
 }
 ```
@@ -94,9 +94,9 @@ In `buildAudioSink()`:
 
 ```gradle
 dependencies {
-    implementation 'com.decent:usb-audio-driver:1.0.0'
-    implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
-    implementation 'com.decent:media3-decoder-flac:1.0.0'
+    implementation 'com.decent.usbaudio:decent-usb-audio-driver:<version>'
+    implementation 'com.decent.usbaudio:decent-usb-audio-wrapper-media3:<version>'
+    implementation 'com.decent.usbaudio:decent-media3-decoder-flac:<version>'
     implementation 'org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1'
 }
 ```

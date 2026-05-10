@@ -28,18 +28,18 @@ internal object BaseCoverLoader {
      * most likely match is found with the fewest [File.exists] calls.
      */
     private val COMMON_ARTWORK_NAMES = listOf(
-            "folder.jpg",    // Most common
-            "cover.jpg",     // beets, MusicBrainz Picard alternate
-            "front.jpg",     
-            "album.jpg",     
-            "albumart.jpg",  
+            "folder.jpg",
+            "cover.jpg",
+            "front.jpg",
+            "album.jpg",
+            "albumart.jpg",
             "folder.png",
             "cover.png",
             "front.png",
             "album.png",
             "albumart.png",
-            "Folder.jpg",    
-            "AlbumArt.jpg"   
+            "Folder.jpg",
+            "AlbumArt.jpg"
     )
 
     /**

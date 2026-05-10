@@ -94,3 +94,16 @@ Build a database of tested DACs with:
 - Supported alt settings
 - Any firmware quirks
 - Feedback endpoint behavior
+
+## Priority 6: Distribution
+
+### Publish libraries to Maven Central
+The three libraries in `libs/` are currently consumed via Gradle composite-build / project paths from sibling repositories. Once the public API has been exercised by community testing across multiple DACs and proven stable, the plan is to publish to Maven Central so consumers can drop them in via standard coordinates:
+
+```kotlin
+implementation("com.decent.usbaudio:decent-usb-audio-driver:<version>")
+implementation("com.decent.usbaudio:decent-usb-audio-wrapper-media3:<version>")
+implementation("com.decent.usbaudio:decent-media3-decoder-flac:<version>")
+```
+
+Until then, the recommended integration path is to add this repository as a sibling clone or git submodule and reference the modules via project paths in `settings.gradle.kts`.

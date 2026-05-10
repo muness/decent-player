@@ -1,6 +1,10 @@
 # Getting Started with Decent USB Audio
 
-Bit-perfect USB audio output for Android, bypassing the entire Android audio stack (AudioFlinger, AudioTrack, AAudio). Audio goes directly from your app to the USB DAC via Linux usbdevfs isochronous transfers.
+Bit-perfect USB audio output for Android, bypassing the entire Android audio stack (AudioFlinger, AudioTrack, AAudio). Audio goes directly from your app to the USB DAC via Linux `usbdevfs` isochronous transfers.
+
+> **Audience:** Android developers who want to drop bit-perfect USB output into their own Media3 / ExoPlayer-based app.
+>
+> This repository ships the **driver and integration libraries**. The standalone `decent-player` music player is future work — see the [main README](../../README.md#about-the-name) for context.
 
 ## What You Get
 
@@ -25,20 +29,22 @@ Bit-perfect USB audio output for Android, bypassing the entire Android audio sta
 
 ### Gradle Dependencies
 
-Add the libraries to your app module:
+> **Until Maven Central publication** (planned after community DAC verification — see the [main README roadmap](../../README.md#roadmap)), integrate the libraries via Gradle composite-build / project paths instead of these coordinates. Full instructions in [Integration Guide § Step 1](INTEGRATION_GUIDE.md).
+
+Once the libraries are published, add them to your app module:
 
 ```gradle
 dependencies {
     // Core USB driver (native URB pipeline, JNI)
-    implementation 'com.decent:usb-audio-driver:1.0.0'
+    implementation 'com.decent.usbaudio:decent-usb-audio-driver:<version>'
     
     // ExoPlayer/Media3 AudioSink wrapper
-    implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
+    implementation 'com.decent.usbaudio:decent-usb-audio-wrapper-media3:<version>'
     
     // Optional: Native FLAC decoder (zero-float integer path for FLAC files)
     // When present, FLAC is decoded to raw int PCM at the extractor level.
     // When absent, the FFmpeg extension handles FLAC via float (also bit-perfect).
-    implementation 'com.decent:media3-decoder-flac:1.0.0'
+    implementation 'com.decent.usbaudio:decent-media3-decoder-flac:<version>'
     
     // FFmpeg decoder extension — NOT built into Media3. Required for non-FLAC
     // formats (MP3, AAC, etc.) and for FLAC when libFLAC is not present.
@@ -115,32 +121,17 @@ The `UsbAudioSink` handles both paths automatically in `handleBuffer()` — it d
 
 You also need to set `EXTENSION_RENDERER_MODE_PREFER` on your `DefaultRenderersFactory` to force FFmpeg for non-FLAC formats. Without FFmpeg, the Android built-in decoder truncates 24-bit sources to 16-bit.
 
-See the [Integration Guide](INTEGRATION_GUIDE.md) for the complete step-by-step with all details (RenderersFactory setup, track bit depth propagation, stale fd handling, lifecycle, etc.).
+See the [Integration Guide](INTEGRATION_GUIDE.md) for the complete step-by-step with all details (RenderersFactory setup, lifecycle, stale fd handling, etc.).
 
-## Setting Track Bit Depth (Required for Bit-Perfect)
+## Bit depth is detected automatically
 
-The sink must know the source file's bit depth to select the correct USB alt setting and verify bit-perfect delivery. Set it **synchronously** on each track change, before ExoPlayer calls `configure()`:
-
-```kotlin
-// Keep a reference to the sink (set it in buildAudioSink)
-private var usbSink: UsbAudioSink? = null
-
-// In your player's MediaItem transition listener:
-player.addListener(object : Player.Listener {
-    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-        val sink = usbSink ?: return
-        mediaItem?.let { item ->
-            // MUST be synchronous — this must complete before ExoPlayer
-            // calls configure() on the sink. If your bit depth comes from
-            // a database query, use runBlocking:
-            runBlocking(Dispatchers.IO) {
-                val bitDepth = getTrackBitDepth(item)  // from your metadata/DB
-                sink.trackBitDepth = bitDepth           // 16, 24, or 32
-            }
-        }
-    }
-})
-```
+You do **not** need to tell the sink the bit depth on each track change.
+For local FLAC files the `NativeAudioEngine` reads the bit depth from the
+file's STREAMINFO block as it opens; for HTTP/HTTPS streams the sink
+captures the source bit depth from the `Format` ExoPlayer hands it in
+`configure()`. As long as you call `usbSink.attachToPlayer(player)` once
+after building the player, the routing is fully automatic and the correct
+USB alt setting is selected every track.
 
 ## Handle USB Device Attach
 

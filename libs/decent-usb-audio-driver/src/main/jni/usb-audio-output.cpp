@@ -2,8 +2,9 @@
  * @file usb-audio-output.cpp
  * @brief Direct USB audio output via Linux usbdevfs isochronous transfers.
  *
- * Pipeline: pre-allocated ring buffer of 64 URBs. No malloc/free during
- * streaming — completely avoids ARM MTE pointer tag issues on Samsung devices.
+ * Pipeline: pre-allocated ring buffer of USB_AUDIO_NUM_URBS (= 80) URBs.
+ * No malloc/free during streaming — completely avoids ARM MTE pointer tag
+ * issues on Samsung devices.
  *
  * ISO URBs with ISO_ASAP complete in FIFO order, so we use a simple ring
  * with submit/reap indices. No need to identify which URB was reaped.
@@ -265,8 +266,9 @@ static int submitRingUrb(UsbAudioContext *ctx, const int *pktSizes, int numPacke
  *
  * IMPORTANT: REAPURBNDELAY returns ANY completed URB — audio or feedback.
  * If we get a feedback URB, we process it (update fpmf, resubmit) and
- * retry. This implements continuous feedback tracking without a separate
- * thread, matching real-time clock calibration.
+ * retry. This implements continuous real-time clock calibration on the
+ * same thread as audio URB recycling — no second thread, no extra
+ * synchronization.
  *
  * @param timeoutMs  Maximum wait in milliseconds
  * @return 0 = success (audio URB reaped), -1 = error, -2 = timeout
@@ -495,7 +497,8 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStart(
 
         // Start continuous feedback: submit a feedback URB that will be
         // automatically recycled in the reap loop during streaming.
-        // Matches industry-standard "send USB" thread (~1ms interval).
+        // The host controller schedules the feedback endpoint once per
+        // microframe (~1 ms effective interval).
         submitFeedbackUrb(ctx);
     }
 

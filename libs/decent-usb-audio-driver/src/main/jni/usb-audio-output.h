@@ -23,8 +23,11 @@
 
 /**
  * Number of URBs in the ring buffer.
- * industry implementations use 76-78 URBs at 44.1kHz. Matching their count to minimize
- * differences in xHCI ring scheduling behavior.
+ * 80 URBs ≈ 80 ms of in-flight audio at 44.1 kHz, which empirically gives
+ * the xHCI host controller enough scheduling headroom to maintain
+ * continuous isochronous output without underruns on commodity Android
+ * SoCs. Smaller pipelines (< ~64 URBs at 44.1 kHz) trigger glitches as
+ * the ring drains faster than the URB submit/reap cycle can refill it.
  */
 #define USB_AUDIO_NUM_URBS 80
 
@@ -124,7 +127,8 @@ struct UsbAudioContext {
      * and continuously recycled during streaming. When the reap loop
      * gets this URB instead of an audio URB, it updates calibratedFpmf
      * and resubmits — tracking the DAC's actual clock in real-time.
-     * Matches industry-standard "send USB" thread behavior (~1ms interval).
+     * Effective polling interval is ~1 ms (the host controller schedules
+     * the feedback endpoint once per microframe).
      */
     struct usbdevfs_urb *feedbackUrb;
     uint8_t feedbackBuffer[4];

@@ -6,25 +6,59 @@ This is the recommended approach for apps that use AndroidX Media3 or ExoPlayer.
 
 ### Step 1: Add Dependencies
 
+> **Maven Central is not yet available** — the `com.decent:*` libraries
+> have not been published as artifacts. While the API stabilizes through
+> community DAC verification, integrate the libraries by cloning this
+> repository as a sibling project and referencing them via project paths
+> in your `settings.gradle.kts`:
+>
+> ```kotlin
+> // settings.gradle.kts
+> include(":decent-usb-audio-driver")
+> include(":decent-usb-audio-wrapper-media3")
+> include(":decent-media3-decoder-flac")
+>
+> project(":decent-usb-audio-driver").projectDir =
+>     file("../decent-player/libs/decent-usb-audio-driver")
+> project(":decent-usb-audio-wrapper-media3").projectDir =
+>     file("../decent-player/libs/decent-usb-audio-wrapper-media3")
+> project(":decent-media3-decoder-flac").projectDir =
+>     file("../decent-player/libs/decent-media3-decoder-flac")
+> ```
+>
+> Then in `app/build.gradle.kts`:
+>
+> ```kotlin
+> dependencies {
+>     implementation(project(":decent-usb-audio-driver"))
+>     implementation(project(":decent-usb-audio-wrapper-media3"))
+>     implementation(project(":decent-media3-decoder-flac"))
+> }
+> ```
+>
+> Once the libraries are published to Maven Central (planned after the
+> public API has been validated by the community), the snippet below will
+> work as standard coordinates:
+
 ```gradle
 dependencies {
     // Core USB driver (native URB pipeline, JNI)
-    implementation 'com.decent:usb-audio-driver:1.0.0'
-    
+    implementation 'com.decent.usbaudio:decent-usb-audio-driver:<version>'
+
     // ExoPlayer/Media3 AudioSink wrapper
-    implementation 'com.decent:usb-audio-wrapper-media3:1.0.0'
-    
+    implementation 'com.decent.usbaudio:decent-usb-audio-wrapper-media3:<version>'
+
     // FFmpeg decoder — REQUIRED for bit-perfect non-FLAC formats. The Android
     // built-in decoder truncates 24-bit to 16-bit. FFmpeg delivers genuine
     // float32 for all sources.
     implementation 'org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1'
-    
+
     // Optional: Native FLAC decoder (zero-float integer path for FLAC files).
     // When present, FLAC is decoded to raw int PCM at the extractor level —
     // zero float math in the entire pipeline. When absent, FFmpeg handles
     // FLAC via the float path (also bit-perfect via x2^N round-trip).
-    implementation 'com.decent:media3-decoder-flac:1.0.0'
-    
+    implementation 'com.decent.usbaudio:decent-media3-decoder-flac:<version>'
+
     // Media3 (your app probably already has these)
     implementation 'androidx.media3:media3-exoplayer:1.9.3'
     implementation 'androidx.media3:media3-common:1.9.3'
@@ -233,7 +267,7 @@ All paths output bit-perfect audio to the USB DAC. The NativeAudioEngine is used
 
 **Streaming-service integration:**
 
-The wrapper is fully compatible with streaming services. Any `DataSource` that ExoPlayer supports works automatically — the wrapper detects non-local URIs and uses the ExoPlayer pipeline. No special configuration needed. The service's `MediaSource.Factory` handles authentication and buffering; the wrapper handles USB output.
+The wrapper is fully compatible with any HTTP/HTTPS-based audio source. Any `DataSource` that ExoPlayer supports works automatically — the wrapper detects non-local URIs and uses the ExoPlayer pipeline. No special configuration needed. Your `MediaSource.Factory` handles authentication and buffering; the wrapper handles USB output.
 
 Tested transitions:
 - Local FLAC → HTTP FLAC stream → Local FLAC (engine ↔ pipeline ↔ engine)
@@ -272,7 +306,7 @@ Tested with FLAC from remote seedbox at 44.1kHz through iBasso DX340 + Cayin RU7
 
 The `wrapLoadControl()` prevents ExoPlayer from reading the audio file when the native engine is active, avoiding SD card FUSE I/O contention (measured: 1.4 GB → 18 MB in 30 seconds).
 
-### Step 7: Configuration Options (Optional)
+### Step 6: Configuration Options (Optional)
 
 The default config works for most cases. Customize if needed:
 
@@ -341,9 +375,11 @@ If your app doesn't use ExoPlayer/Media3, you can use the USB driver library dir
 
 ### Add Dependency
 
+> See the Maven note in [Step 1](#step-1-add-dependencies) — until publication, integrate via project paths.
+
 ```gradle
 dependencies {
-    implementation 'com.decent:usb-audio-driver:1.0.0'
+    implementation 'com.decent.usbaudio:decent-usb-audio-driver:<version>'
 }
 ```
 
