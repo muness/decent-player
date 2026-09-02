@@ -16,8 +16,12 @@
 #include <linux/usbdevice_fs.h>
 
 /**
- * Number of isochronous packets per URB submission.
- * At USB high-speed (125us microframes), 8 packets = 1ms of audio.
+ * Upper bound on isochronous packets per URB submission.
+ * At USB high-speed (125us microframes), 8 packets = 1ms of audio, which is
+ * what an endpoint with bInterval=1 (serviced every microframe) needs. An
+ * endpoint with a larger bInterval is serviced less often and therefore needs
+ * fewer, larger packets to cover the same millisecond — see
+ * UsbAudioContext::packetsPerUrb. This macro sizes the fixed-length arrays.
  */
 #define USB_AUDIO_PACKETS_PER_URB 8
 
@@ -32,9 +36,18 @@
 #define USB_AUDIO_NUM_URBS 80
 
 /**
- * Max bytes per URB data buffer.
- * Worst case: 384kHz * 4 bytes * 2 channels / 8000 microframes * 8 packets
- *           = 384 * 8 = 3072 bytes per URB. Round up generously.
+ * Floor for the per-URB data buffer.
+ * The old fixed size, kept as a lower bound so nothing shrinks: PCM up to
+ * 384kHz * 4 bytes * 2 channels / 8000 microframes * 8 packets = 3072 bytes
+ * still fits well inside it.
+ *
+ * The actual buffer is now sized from endpoint geometry
+ * (wMaxPacketSize * packetsPerUrb, see UsbAudioContext::urbBufferSize),
+ * because a fixed 1ms 4096-byte URB cannot hold every format a UAC2 endpoint
+ * can carry. Stereo DSD512 in a 32-bit subslot is 705600 wire frames per
+ * second at 8 bytes per frame — 5644.8 bytes per millisecond, which overflows
+ * 4096. The Cayin RU7 advertises wMaxPacketSize=776 at bInterval=1, so its
+ * geometry-derived buffer is 776 * 8 = 6208 bytes and the format fits.
  */
 #define USB_AUDIO_URB_BUFFER_SIZE 4096
 
@@ -72,7 +85,31 @@ struct UsbAudioContext {
     int32_t bitDepth;
     int32_t bytesPerSample;
     int32_t bytesPerFrame;
+    /** wMaxPacketSize of the isochronous OUT endpoint, from its descriptor. */
     int32_t maxPacketSize;
+    /** bInterval of the isochronous OUT endpoint. 1 = every microframe. */
+    int32_t endpointInterval;
+
+    // ── Endpoint geometry, derived at creation ──────────────────
+    /**
+     * Microframes between services of the data endpoint: 1 << (bInterval - 1).
+     * bInterval=1 gives 1, which is what every DAC tested so far reports.
+     */
+    int32_t microframesPerPacket;
+
+    /**
+     * Isochronous packets in one URB, together covering 1 ms:
+     * 8 / microframesPerPacket. Equals USB_AUDIO_PACKETS_PER_URB (8) whenever
+     * bInterval is 1, so existing devices keep the exact packet layout they
+     * had before.
+     */
+    int32_t packetsPerUrb;
+
+    /**
+     * Bytes one URB data buffer can hold:
+     * max(maxPacketSize * packetsPerUrb, USB_AUDIO_URB_BUFFER_SIZE).
+     */
+    int32_t urbBufferSize;
 
     std::atomic<bool> running;
 
@@ -113,12 +150,14 @@ struct UsbAudioContext {
     double calibratedFpmf;
 
     /**
-     * Residual buffer for bytes that didn't align to a complete frame
-     * at the end of a write() call. Prepended to the next call's data
-     * to avoid micro-discontinuities (pops) at buffer boundaries.
-     * Max size = bytesPerFrame - 1 (e.g., 7 bytes for 32-bit stereo).
+     * Residual buffer for bytes that didn't fill a complete URB at the end of
+     * a write() call. Prepended to the next call's data to avoid
+     * micro-discontinuities (pops) at buffer boundaries. Heap-allocated with
+     * urbBufferSize capacity, because the leftover can be just short of one
+     * whole URB and that is no longer a compile-time constant.
      */
-    uint8_t residualBuffer[USB_AUDIO_URB_BUFFER_SIZE];
+    uint8_t *residualBuffer;
+    int residualCapacity;
     int residualBytes;
 
     // ── Continuous feedback ─────────────────────────────────────

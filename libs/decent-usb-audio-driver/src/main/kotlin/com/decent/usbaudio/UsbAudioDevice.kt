@@ -162,6 +162,7 @@ class UsbAudioDevice private constructor(private val context: Context) {
         var endpointOut = -1
         var endpointFeedback = -1
         var maxPacketSize = 0
+        var endpointInterval = 1
         var altSettingCount = 0
 
         // Count alternate settings for the streaming interface
@@ -183,6 +184,10 @@ class UsbAudioDevice private constructor(private val context: Context) {
                                     ep.direction == UsbConstants.USB_DIR_OUT -> {
                                 endpointOut = ep.address
                                 maxPacketSize = ep.maxPacketSize
+                                // bInterval decides how many ISO packets cover
+                                // 1 ms, and with wMaxPacketSize how large the
+                                // URB data buffer must be.
+                                endpointInterval = ep.interval
                                 Log.i(TAG, "Found ISO OUT endpoint: address=0x${ep.address.toString(16)}, " +
                                         "maxPacket=$maxPacketSize, interval=${ep.interval}")
                             }
@@ -273,6 +278,7 @@ class UsbAudioDevice private constructor(private val context: Context) {
                 endpointOutAddress = endpointOut,
                 endpointFeedbackAddress = endpointFeedback,
                 maxPacketSize = maxPacketSize,
+                endpointInterval = endpointInterval,
                 altSettingCount = altSettingCount,
                 clockSourceId = clockSourceId,
                 bestAltSetting = bestAlt,

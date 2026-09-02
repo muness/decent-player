@@ -32,6 +32,10 @@ import android.util.Log
  * @param channelCount     Number of channels (1=mono, 2=stereo)
  * @param bitDepth         Bits per sample (16, 24, or 32)
  * @param maxPacketSize    Max packet size from endpoint descriptor
+ * @param endpointInterval bInterval of the ISO OUT endpoint. The native layer
+ *                         derives packets-per-URB and the URB buffer size from
+ *                         this together with maxPacketSize. Defaults to 1,
+ *                         which reproduces the previous fixed geometry.
  */
 class UsbAudioStream(
         fd: Int,
@@ -41,7 +45,8 @@ class UsbAudioStream(
         sampleRate: Int,
         channelCount: Int,
         bitDepth: Int,
-        maxPacketSize: Int
+        maxPacketSize: Int,
+        endpointInterval: Int = 1
 ) {
 
     /** Native UsbAudioContext pointer. Exposed for NativeAudioEngine which
@@ -52,7 +57,7 @@ class UsbAudioStream(
     init {
         nativeHandle = nativeUsbAudioCreate(
                 fd, interfaceId, endpointOut, endpointFeedback,
-                sampleRate, channelCount, bitDepth, maxPacketSize
+                sampleRate, channelCount, bitDepth, maxPacketSize, endpointInterval
         )
         if (nativeHandle == 0L) {
             Log.e(TAG, "nativeUsbAudioCreate returned 0 — check logcat for native errors")
@@ -188,7 +193,8 @@ class UsbAudioStream(
 
     private external fun nativeUsbAudioCreate(
             fd: Int, interfaceId: Int, endpointOut: Int, endpointFeedback: Int,
-            sampleRate: Int, channelCount: Int, bitDepth: Int, maxPacketSize: Int
+            sampleRate: Int, channelCount: Int, bitDepth: Int, maxPacketSize: Int,
+            endpointInterval: Int
     ): Long
 
     private external fun nativeUsbAudioSetAltSetting(handle: Long, altSetting: Int): Boolean

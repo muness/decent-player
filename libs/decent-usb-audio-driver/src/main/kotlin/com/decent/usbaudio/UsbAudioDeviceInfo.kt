@@ -13,6 +13,8 @@ data class UsbAudioDeviceInfo(
     val endpointOutAddress: Int,
     val endpointFeedbackAddress: Int,
     val maxPacketSize: Int,
+    /** bInterval of the isochronous OUT endpoint. 1 = serviced every microframe. */
+    val endpointInterval: Int,
     val altSettingCount: Int,
     val clockSourceId: Int,
     val bestAltSetting: Int,

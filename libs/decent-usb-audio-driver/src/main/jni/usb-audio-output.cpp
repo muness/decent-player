@@ -86,7 +86,7 @@ static bool allocRing(UsbAudioContext *ctx) {
                            USB_AUDIO_PACKETS_PER_URB * sizeof(struct usbdevfs_iso_packet_desc);
     for (int i = 0; i < USB_AUDIO_NUM_URBS; i++) {
         ctx->ring[i].urb = (struct usbdevfs_urb *)calloc(1, urbStructSize);
-        ctx->ring[i].buffer = (uint8_t *)malloc(USB_AUDIO_URB_BUFFER_SIZE);
+        ctx->ring[i].buffer = (uint8_t *)malloc((size_t)ctx->urbBufferSize);
         ctx->ring[i].dataLength = 0;
         if (!ctx->ring[i].urb || !ctx->ring[i].buffer) {
             LOGE("allocRing: OOM at slot %d", i);
@@ -114,6 +114,37 @@ static void freeRing(UsbAudioContext *ctx) {
         ctx->ring[i].buffer = nullptr;
     }
     ctx->ringAllocated = false;
+}
+
+/**
+ * Derive the isochronous transfer geometry from the endpoint descriptor.
+ *
+ * A high-speed USB frame is 1 ms and holds 8 microframes of 125 us. An
+ * isochronous endpoint with bInterval = n is serviced once every 2^(n-1)
+ * microframes, so one millisecond of audio needs 8 / 2^(n-1) packets — and
+ * each packet must hold that many microframes' worth of frames, which is why
+ * the buffer is sized from wMaxPacketSize rather than from a constant.
+ *
+ * With bInterval = 1 (every DAC tested so far, the Cayin RU7 included) this
+ * yields the historical 8 packets per URB, so the packet layout is unchanged.
+ */
+static void deriveGeometry(UsbAudioContext *ctx) {
+    int interval = ctx->endpointInterval <= 0 ? 1 : ctx->endpointInterval;
+    if (interval > 8) interval = 8;
+    ctx->microframesPerPacket = 1 << (interval - 1);
+    ctx->packetsPerUrb = USB_AUDIO_PACKETS_PER_URB / ctx->microframesPerPacket;
+    if (ctx->packetsPerUrb < 1) ctx->packetsPerUrb = 1;
+
+    int32_t fromEndpoint = ctx->maxPacketSize > 0
+                           ? ctx->maxPacketSize * ctx->packetsPerUrb : 0;
+    ctx->urbBufferSize = fromEndpoint > USB_AUDIO_URB_BUFFER_SIZE
+                         ? fromEndpoint : USB_AUDIO_URB_BUFFER_SIZE;
+
+    LOGI("Geometry: bInterval=%d microframesPerPacket=%d packetsPerUrb=%d "
+         "wMaxPacketSize=%d urbBuffer=%d bytes (ring=%d URBs, %d bytes total)",
+         interval, ctx->microframesPerPacket, ctx->packetsPerUrb,
+         ctx->maxPacketSize, ctx->urbBufferSize, USB_AUDIO_NUM_URBS,
+         ctx->urbBufferSize * USB_AUDIO_NUM_URBS);
 }
 
 // ── USB helpers ─────────────────────────────────────────────────────
@@ -398,9 +429,9 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioCreate(
         JNIEnv *, jobject, jint fd, jint ifId, jint epOut, jint epFb,
-        jint rate, jint ch, jint bits, jint maxPkt) {
-    LOGI("Create: fd=%d ep=0x%02x rate=%d ch=%d bits=%d maxPkt=%d",
-         fd, epOut, rate, ch, bits, maxPkt);
+        jint rate, jint ch, jint bits, jint maxPkt, jint epInterval) {
+    LOGI("Create: fd=%d ep=0x%02x rate=%d ch=%d bits=%d maxPkt=%d bInterval=%d",
+         fd, epOut, rate, ch, bits, maxPkt, epInterval);
     auto *ctx = new(std::nothrow) UsbAudioContext();
     if (!ctx) return 0;
     ctx->fd = fd;
@@ -413,6 +444,8 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioCreate(
     ctx->bytesPerSample = bits / 8;
     ctx->bytesPerFrame = (bits / 8) * ch;
     ctx->maxPacketSize = maxPkt;
+    ctx->endpointInterval = epInterval;
+    deriveGeometry(ctx);
     ctx->running.store(false);
     ctx->transferBuffer = nullptr;
     ctx->transferBufferCapacity = 0;
@@ -425,19 +458,27 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioCreate(
     ctx->frameAccumulator = 0.0;
     ctx->calibratedFpmf = rate / 8000.0;
     ctx->residualBytes = 0;
-    memset(ctx->residualBuffer, 0, sizeof(ctx->residualBuffer));
+    ctx->residualCapacity = ctx->urbBufferSize;
+    ctx->residualBuffer = (uint8_t *)calloc(1, (size_t)ctx->residualCapacity);
+    if (!ctx->residualBuffer) {
+        LOGE("Create: OOM allocating %d-byte residual buffer", ctx->residualCapacity);
+        delete ctx;
+        return 0;
+    }
     memset(ctx->ring, 0, sizeof(ctx->ring));
     ctx->feedbackUrb = nullptr;
     ctx->feedbackInFlight = false;
     memset(ctx->feedbackBuffer, 0, sizeof(ctx->feedbackBuffer));
 
     if (!allocRing(ctx)) {
+        free(ctx->residualBuffer);
         delete ctx;
         return 0;
     }
 
     if (!allocFeedbackUrb(ctx)) {
         freeRing(ctx);
+        free(ctx->residualBuffer);
         delete ctx;
         return 0;
     }
@@ -504,7 +545,7 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioStart(
 
     LOGI("Start: rate=%d ch=%d bits=%d ring=%d slots×%dpkt fpmf=%.4f feedback=%s",
          ctx->sampleRate, ctx->channelCount, ctx->bitDepth,
-         USB_AUDIO_NUM_URBS, USB_AUDIO_PACKETS_PER_URB,
+         USB_AUDIO_NUM_URBS, ctx->packetsPerUrb,
          ctx->calibratedFpmf,
          ctx->feedbackInFlight ? "continuous" : "one-shot");
     return JNI_TRUE;
@@ -610,6 +651,8 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbAudioDestroy(
     freeRing(ctx);
     free(ctx->feedbackUrb);
     ctx->feedbackUrb = nullptr;
+    free(ctx->residualBuffer);
+    ctx->residualBuffer = nullptr;
     free(ctx->transferBuffer);
     LOGI("Destroy: %lld frames total", (long long)ctx->framesWritten);
     delete ctx;
@@ -710,11 +753,14 @@ void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalByte
         int numPackets = 0;
         int urbBytes = 0;
 
-        for (int p = 0; p < USB_AUDIO_PACKETS_PER_URB; p++) {
+        for (int p = 0; p < ctx->packetsPerUrb; p++) {
             int remaining = dataLen - offset - urbBytes;
             if (remaining <= 0) break;
 
-            ctx->frameAccumulator += fpmf;
+            // One packet covers microframesPerPacket microframes, so it carries
+            // that many microframes' worth of frames. With bInterval=1 this is
+            // the original "one microframe per packet".
+            ctx->frameAccumulator += fpmf * ctx->microframesPerPacket;
             int frames = (int)ctx->frameAccumulator;
             ctx->frameAccumulator -= frames;
             int b = frames * ctx->bytesPerFrame;
@@ -732,15 +778,30 @@ void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalByte
         }
         if (numPackets <= 0 || urbBytes <= 0) break;
 
+        // The geometry guarantees this, since every packet is at most
+        // wMaxPacketSize. Refuse rather than overflow if a device ever
+        // advertises a wMaxPacketSize its own clock exceeds.
+        if (urbBytes > ctx->urbBufferSize) {
+            LOGE("submitPcmToUrbs: planned URB of %d bytes exceeds buffer %d "
+                 "(wMaxPacketSize=%d, packetsPerUrb=%d) — stopping stream",
+                 urbBytes, ctx->urbBufferSize, ctx->maxPacketSize, ctx->packetsPerUrb);
+            ctx->running.store(false);
+            free(mergedBuf);
+            return;
+        }
+
         // Never submit short URBs (< full packet count). Short URBs create
         // empty ISO microframes in the xHCI schedule — the DAC receives
         // silence for those microframes → audible click/pop.
         // Instead, save leftover data for the next write() call.
-        if (numPackets < USB_AUDIO_PACKETS_PER_URB) {
+        if (numPackets < ctx->packetsPerUrb) {
             int leftover = dataLen - offset;
-            if (leftover > 0 && leftover < (int)sizeof(ctx->residualBuffer)) {
+            if (leftover > 0 && leftover <= ctx->residualCapacity) {
                 memcpy(ctx->residualBuffer, data + offset, leftover);
                 ctx->residualBytes = leftover;
+            } else if (leftover > ctx->residualCapacity) {
+                LOGW("submitPcmToUrbs: dropping %d leftover bytes, residual holds %d",
+                     leftover, ctx->residualCapacity);
             }
             break;
         }
@@ -775,7 +836,7 @@ void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalByte
     // Save any leftover bytes for the next call.
     // This catches sub-frame leftovers (the short-URB case is handled above).
     int leftover = dataLen - offset;
-    if (leftover > 0 && leftover < (int)sizeof(ctx->residualBuffer) && ctx->residualBytes == 0) {
+    if (leftover > 0 && leftover <= ctx->residualCapacity && ctx->residualBytes == 0) {
         memcpy(ctx->residualBuffer, data + offset, leftover);
         ctx->residualBytes = leftover;
     }
