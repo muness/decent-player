@@ -81,6 +81,13 @@ Pre-configure the next track's sample rate and alt setting while the current tra
 ## Priority 5: Testing
 
 ### Automated testing
+
+A host test now covers the URB pipeline without hardware:
+`libs/decent-usb-audio-driver/src/test/native` replaces the kernel with a fake
+usbdevfs behind the `UsbAudioBackend` seam and asserts byte equality, feedback
+scheduling, out-of-order and stale completions, drain, and `GET_SPEED`. Run it
+on any Linux host with `make`. Still needed on real hardware:
+
 - Test with multiple DACs (Topping, FiiO, Shanling, iFi, etc.)
 - Test all sample rates (44.1k through 384k)
 - Test all bit depths (16, 24, 32)

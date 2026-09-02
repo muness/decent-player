@@ -14,6 +14,10 @@
 
 #include <atomic>
 #include <cstdint>
+// sys/ioctl.h first: glibc's linux/usbdevice_fs.h needs the _IO/_IOR/_IOW
+// macros, which bionic's uapi headers pull in on their own but glibc does not.
+// This matters for the host test build (src/test/native).
+#include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
 
 /**
@@ -38,6 +42,28 @@
  *           = 384 * 8 = 3072 bytes per URB. Round up generously.
  */
 #define USB_AUDIO_URB_BUFFER_SIZE 4096
+
+/**
+ * Every kernel interaction the pipeline performs, behind one small table.
+ *
+ * The default implementation calls ioctl() and usleep() directly, so
+ * production behaviour is unchanged. Substituting a table is the only way the
+ * isochronous path can run without a DAC: the host test in src/test/native
+ * supplies a fake usbdevfs that records submitted packets, completes URBs on
+ * a virtual microframe clock, and can reorder or corrupt completions on
+ * demand.
+ */
+struct UsbAudioBackend {
+    /** Mirrors ioctl(fd, request, argument) and returns its result. */
+    int (*control)(void *context, int fd, unsigned long request, void *argument);
+    /** Mirrors usleep(microseconds). */
+    void (*wait)(void *context, unsigned microseconds);
+    /** Opaque state for the two callbacks above. */
+    void *context;
+};
+
+/** The real usbdevfs backend. Used whenever a caller passes no backend. */
+const UsbAudioBackend &usbAudioRealBackend();
 
 /**
  * One slot in the pre-allocated URB ring buffer.
@@ -170,7 +196,39 @@ struct UsbAudioContext {
     struct usbdevfs_urb *feedbackUrb;
     uint8_t feedbackBuffer[4];
     bool feedbackInFlight;
+
+    /** Kernel interface in use. Defaults to usbAudioRealBackend(). */
+    UsbAudioBackend backend;
 };
+
+// ── Stream lifecycle (JNI-free, so the host test can drive it) ─────
+
+/**
+ * Allocate the ring and the feedback URB. Returns nullptr on failure.
+ * The caller keeps ownership of the file descriptor and must have already
+ * claimed the interface and selected the alternate setting.
+ *
+ * @param backend  nullptr for the real kernel; a table for the host test.
+ */
+UsbAudioContext *usbAudioCreate(int fd, int interfaceId, int endpointOut,
+                                int endpointFeedback, int sampleRate,
+                                int channelCount, int bitDepth, int maxPacketSize,
+                                const UsbAudioBackend *backend);
+
+/** Prime the feedback endpoint and begin accepting writes. */
+bool usbAudioStart(UsbAudioContext *ctx);
+
+/** Stop accepting writes and reap or discard every in-flight URB. */
+int usbAudioDrain(UsbAudioContext *ctx);
+
+/** Drain, then free the ring. The file descriptor is not closed here. */
+void usbAudioDestroy(UsbAudioContext *ctx);
+
+/**
+ * Read the device's bus speed with USBDEVFS_GET_SPEED. Returns the raw
+ * USB_SPEED_* enum value, or a negative errno on failure.
+ */
+int usbAudioGetBusSpeed(int fd, const UsbAudioBackend *backend);
 
 // ── Functions accessible from native-audio-engine ──────────────────
 
