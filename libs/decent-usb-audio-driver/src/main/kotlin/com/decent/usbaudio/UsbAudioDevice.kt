@@ -251,6 +251,36 @@ class UsbAudioDevice private constructor(private val context: Context) {
         val fd = conn.fileDescriptor
         val interfaceId = streamingInterface.id
 
+        // Refuse anything that is not scheduled in 125us microframes. The
+        // packet sizing, the 125us reap poll and the Q16.16 feedback decode are
+        // all high-speed semantics; on a full-speed bus they would produce a
+        // plausible-looking stream at the wrong clock instead of an error.
+        var busSpeed = UsbBusSpeed.fromIoctl(UsbAudioStream.nativeGetBusSpeed(fd))
+        var busSpeedSource = UsbBusSpeed.SOURCE_IOCTL
+        if (busSpeed == UsbBusSpeed.UNKNOWN) {
+            // The ioctl is unavailable on kernels older than 2.6.35. Fall back
+            // to the descriptors, which can confirm high-speed but never rule
+            // it out.
+            busSpeed = UsbBusSpeed.fromDescriptors(parseBcdUsb(conn), maxPacketSize)
+            busSpeedSource = if (busSpeed == UsbBusSpeed.UNKNOWN) {
+                UsbBusSpeed.SOURCE_NONE
+            } else {
+                UsbBusSpeed.SOURCE_DESCRIPTORS
+            }
+        }
+        if (!UsbBusSpeed.usesMicroframeTiming(busSpeed)) {
+            Log.e(TAG, "Refusing ${device.productName}: bus speed is " +
+                    "${UsbBusSpeed.name(busSpeed)} ($busSpeedSource). This driver " +
+                    "schedules in 125us microframes and decodes Q16.16 feedback, " +
+                    "which is high-speed only. Full-speed support needs 1ms frame " +
+                    "timing and the 10.14 feedback format.")
+            conn.releaseInterface(streamingInterface)
+            conn.close()
+            claimedInterface = null
+            return null
+        }
+        Log.i(TAG, "Bus speed: ${UsbBusSpeed.name(busSpeed)} (via $busSpeedSource)")
+
         Log.i(TAG, "Device opened: ${device.productName}, fd=$fd, " +
                 "iface=$interfaceId, epOut=0x${endpointOut.toString(16)}, " +
                 "epFb=0x${endpointFeedback.toString(16)}, " +
@@ -276,7 +306,9 @@ class UsbAudioDevice private constructor(private val context: Context) {
                 altSettingCount = altSettingCount,
                 clockSourceId = clockSourceId,
                 bestAltSetting = bestAlt,
-                bestBitDepth = bestBits
+                bestBitDepth = bestBits,
+                busSpeed = busSpeed,
+                busSpeedSource = busSpeedSource
         )
         cachedDeviceInfo = info
         return info
@@ -304,6 +336,22 @@ class UsbAudioDevice private constructor(private val context: Context) {
         claimedInterface = null
         // DO NOT close connection — the fd from reset+native claim must be reused
         // The next openDevice() will see connection != null and skip re-opening
+    }
+
+    /**
+     * Read bcdUSB from the device descriptor, which is always the first
+     * descriptor in the raw byte array: bLength, bDescriptorType, then
+     * bcdUSB as a little-endian 16-bit BCD version (0x0200 = USB 2.0).
+     *
+     * @return bcdUSB, or 0 when the descriptors are unavailable or truncated.
+     */
+    private fun parseBcdUsb(conn: UsbDeviceConnection): Int {
+        val raw = conn.rawDescriptors ?: return 0
+        if (raw.size < 4) return 0
+        val bDescriptorType = raw[1].toInt() and 0xFF
+        // 0x01 = DEVICE descriptor
+        if (bDescriptorType != 0x01) return 0
+        return (raw[2].toInt() and 0xFF) or ((raw[3].toInt() and 0xFF) shl 8)
     }
 
     /**

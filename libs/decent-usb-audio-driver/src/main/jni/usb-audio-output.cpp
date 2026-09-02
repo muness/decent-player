@@ -28,6 +28,13 @@
 #define USBDEVFS_URB_ISO_ASAP 0x02
 #endif
 
+// Added in Linux 2.6.35. Declared here because some NDK sysroots still ship an
+// older linux/usbdevice_fs.h. Returns the kernel's USB_SPEED_* enum for the
+// device behind the fd, taking no argument.
+#ifndef USBDEVFS_GET_SPEED
+#define USBDEVFS_GET_SPEED _IO('U', 31)
+#endif
+
 #define TAG "UsbAudioOutput"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  TAG, __VA_ARGS__)
@@ -629,6 +636,29 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeGetFramesWritten(
     auto *ctx = reinterpret_cast<UsbAudioContext *>(h);
     if (!ctx) return 0;
     return (jlong)ctx->framesWritten;
+}
+
+/**
+ * Ask the kernel what speed this device is enumerated at.
+ *
+ * The whole isochronous scheduler assumes 125us microframes: packet sizes come
+ * from sampleRate/8000, the poll interval is 125us, and the feedback endpoint
+ * is decoded as Q16.16 frames per microframe. Those are high-speed semantics.
+ * A full-speed device would need 1ms frames and the 10.14 feedback format, so
+ * the Kotlin layer refuses instead of mis-clocking the DAC.
+ *
+ * @return the kernel's USB_SPEED_* value, or a negative errno on failure.
+ */
+JNIEXPORT jint JNICALL
+Java_com_decent_usbaudio_UsbAudioStream_nativeGetBusSpeed(
+        JNIEnv *, jclass, jint fd) {
+    int speed = ioctl(fd, USBDEVFS_GET_SPEED, 0);
+    if (speed < 0) {
+        LOGW("USBDEVFS_GET_SPEED fd=%d failed errno=%d (%s)", fd, errno, strerror(errno));
+        return -errno;
+    }
+    LOGI("USBDEVFS_GET_SPEED fd=%d: %d", fd, speed);
+    return speed;
 }
 
 JNIEXPORT jint JNICALL

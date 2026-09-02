@@ -16,5 +16,9 @@ data class UsbAudioDeviceInfo(
     val altSettingCount: Int,
     val clockSourceId: Int,
     val bestAltSetting: Int,
-    val bestBitDepth: Int
+    val bestBitDepth: Int,
+    /** Bus speed, as a [UsbBusSpeed] constant. Always microframe-timed. */
+    val busSpeed: Int,
+    /** How [busSpeed] was determined, for logging. See [UsbBusSpeed]. */
+    val busSpeedSource: String
 )

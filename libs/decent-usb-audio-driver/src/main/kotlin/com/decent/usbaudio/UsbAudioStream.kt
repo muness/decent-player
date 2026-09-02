@@ -217,5 +217,13 @@ class UsbAudioStream(
          */
         @JvmStatic
         external fun nativeUsbReset(fd: Int): Int
+
+        /**
+         * Ask the kernel for the device's bus speed via USBDEVFS_GET_SPEED.
+         * @return a [UsbBusSpeed] constant, or a negative errno if the ioctl
+         *         failed (an old kernel, or a revoked fd).
+         */
+        @JvmStatic
+        external fun nativeGetBusSpeed(fd: Int): Int
     }
 }

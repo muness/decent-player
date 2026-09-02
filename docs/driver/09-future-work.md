@@ -46,6 +46,18 @@ Older/cheaper DACs use USB Audio Class 1.0. Key differences:
 - Full-speed USB (12 Mbps) with 1ms frames (not 125μs microframes)
 - Different descriptor format
 
+### Full-speed bus timing
+`UsbAudioDevice.openDevice()` now queries `USBDEVFS_GET_SPEED` and refuses
+anything that is not microframe-timed, because the whole pipeline assumes
+high-speed. Supporting full-speed properly needs three changes:
+- Packet sizing from `sampleRate / 1000` (1ms frames), not `/ 8000`
+- `bInterval` interpreted as whole frames, not `2^(bInterval-1)` microframes
+- The **10.14** explicit-feedback format (frames per frame, 3 bytes on the
+  wire) instead of the high-speed **16.16** format the reap loop decodes today
+
+Until then a full-speed DAC is rejected with a clear log line rather than
+being driven at the wrong clock.
+
 ### Multiple DAC support
 Currently assumes one USB audio device. Should handle:
 - Multiple USB audio devices connected simultaneously
