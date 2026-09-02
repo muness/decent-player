@@ -355,23 +355,36 @@ class UsbAudioDevice private constructor(private val context: Context) {
     }
 
     /**
-     * Parse raw USB descriptors to find the best (highest bit depth) alt setting
-     * for the AudioStreaming interface.
+     * Parse raw USB descriptors to find the best (highest bit depth) PCM alt
+     * setting for the AudioStreaming interface.
      *
-     * Scans AS Format Type I descriptors (CS_INTERFACE 0x02) for bBitResolution
-     * and returns the alt setting with the highest value.
+     * Two class-specific descriptors are read per alt setting:
+     * - AS_GENERAL (CS_INTERFACE 0x24, subtype 0x01) for `bmFormats`, which
+     *   says whether the alt setting carries PCM or RAW_DATA
+     * - AS Format Type I (subtype 0x02) for bSubslotSize / bBitResolution
+     *
+     * RAW_DATA alt settings (`bmFormats` D31) are recorded but never chosen.
+     * They are how a UAC2 DAC advertises native DSD, and they routinely report
+     * 32-bit / 4-byte subslots — identical to the PCM 32-bit alt setting — so
+     * a bit-depth-only scan can select one and send PCM down a DSD endpoint.
      *
      * @return Pair(altSetting, bitDepth), or Pair(1, 16) as default.
      */
-    /** Parsed alt setting: (altNumber, bitResolution) */
-    private var parsedAltSettings: List<Pair<Int, Int>> = emptyList()
+    /** Every AudioStreaming alt setting parsed from the descriptors. */
+    private var parsedAltSettings: List<UsbAsAltSetting> = emptyList()
+
+    /** Alt settings whose AS_GENERAL bmFormats sets D31 (RAW_DATA). */
+    val rawDataAltSettings: List<UsbAsAltSetting>
+        get() = parsedAltSettings.filter { it.isRawData }
 
     private fun parseBestAltSetting(conn: UsbDeviceConnection): Pair<Int, Int> {
         val raw = conn.rawDescriptors ?: return Pair(1, 16)
-        val altSettings = mutableListOf<Pair<Int, Int>>()
+        val altSettings = mutableListOf<UsbAsAltSetting>()
 
         var i = 0
         var currentAlt = 0
+        var currentProtocol = 0x20
+        var currentFormatBits = 0
         var inAudioStreaming = false
         var bestAlt = 1
         var bestBits = 16
@@ -389,23 +402,48 @@ class UsbAudioDevice private constructor(private val context: Context) {
                 val bInterfaceSubClass = raw[i + 6].toInt() and 0xFF
                 val bAlternateSetting = raw[i + 3].toInt() and 0xFF
                 inAudioStreaming = (bInterfaceClass == 1 && bInterfaceSubClass == 2)
-                if (inAudioStreaming) currentAlt = bAlternateSetting
+                if (inAudioStreaming) {
+                    currentAlt = bAlternateSetting
+                    // bInterfaceProtocol: 0x20 = UAC2, 0x00 = UAC1
+                    currentProtocol = raw[i + 7].toInt() and 0xFF
+                    currentFormatBits = 0
+                }
             }
 
-            // CS_INTERFACE (0x24) in AudioStreaming — Format Type I (subtype 0x02)
-            if (inAudioStreaming && bDescriptorType == 0x24 && bLength >= 6) {
+            if (inAudioStreaming && bDescriptorType == 0x24 && bLength >= 3) {
                 val bDescriptorSubtype = raw[i + 2].toInt() and 0xFF
-                if (bDescriptorSubtype == 0x02) {
+
+                // AS_GENERAL (subtype 0x01) carries the format, not the layout.
+                if (bDescriptorSubtype == 0x01) {
+                    currentFormatBits = readFormatBits(raw, i, bLength, currentProtocol)
+                }
+
+                // Format Type I (subtype 0x02) carries the layout.
+                if (bDescriptorSubtype == 0x02 && bLength >= 6) {
                     val bSubslotSize = raw[i + 4].toInt() and 0xFF
                     val bBitResolution = raw[i + 5].toInt() and 0xFF
-                    Log.i(TAG, "parseBestAltSetting: alt=$currentAlt subslotSize=$bSubslotSize bitResolution=$bBitResolution")
 
                     if (currentAlt > 0) {
-                        altSettings.add(Pair(currentAlt, bBitResolution))
-                    }
-                    if (bBitResolution > bestBits && currentAlt > 0) {
-                        bestBits = bBitResolution
-                        bestAlt = currentAlt
+                        val parsed = UsbAsAltSetting(
+                                altSetting = currentAlt,
+                                subslotSize = bSubslotSize,
+                                bitResolution = bBitResolution,
+                                formatBits = currentFormatBits
+                        )
+                        altSettings.add(parsed)
+                        Log.i(TAG, "parseBestAltSetting: ${parsed.describe()}")
+
+                        // RAW_DATA is a DSD bitstream endpoint, not a wider PCM
+                        // one. Never pick it as "best": it commonly reports the
+                        // same 32-bit / 4-byte layout as the PCM 32-bit alt.
+                        if (parsed.isRawData) {
+                            Log.i(TAG, "parseBestAltSetting: alt=$currentAlt is a " +
+                                    "native-DSD (RAW_DATA) candidate — excluded from " +
+                                    "PCM alt selection")
+                        } else if (bBitResolution > bestBits) {
+                            bestBits = bBitResolution
+                            bestAlt = currentAlt
+                        }
                     }
                 }
             }
@@ -414,8 +452,34 @@ class UsbAudioDevice private constructor(private val context: Context) {
         }
 
         parsedAltSettings = altSettings
-        Log.i(TAG, "parseBestAltSetting: best alt=$bestAlt bits=$bestBits, all=$altSettings")
+        Log.i(TAG, "parseBestAltSetting: best PCM alt=$bestAlt bits=$bestBits, " +
+                "all=${altSettings.map { it.describe() }}")
         return Pair(bestAlt, bestBits)
+    }
+
+    /**
+     * Read the format field from an AS_GENERAL descriptor.
+     *
+     * UAC2: bLength, bDescriptorType, bDescriptorSubtype, bTerminalLink,
+     * bmControls, bFormatType, then `bmFormats` as a little-endian 32-bit
+     * bitmap at offset 6. D0 is PCM, D31 is RAW_DATA.
+     *
+     * UAC1: bLength, bDescriptorType, bDescriptorSubtype, bTerminalLink,
+     * bDelay, then `wFormatTag` as a little-endian 16-bit value at offset 5.
+     * 0x0001 is PCM, 0x0008 is the tag DSD-capable devices use.
+     */
+    private fun readFormatBits(raw: ByteArray, offset: Int, bLength: Int, protocol: Int): Int {
+        if (protocol == 0x20 && bLength >= 16) {
+            return (raw[offset + 6].toInt() and 0xFF) or
+                    ((raw[offset + 7].toInt() and 0xFF) shl 8) or
+                    ((raw[offset + 8].toInt() and 0xFF) shl 16) or
+                    ((raw[offset + 9].toInt() and 0xFF) shl 24)
+        }
+        if (protocol != 0x20 && bLength >= 7) {
+            return (raw[offset + 5].toInt() and 0xFF) or
+                    ((raw[offset + 6].toInt() and 0xFF) shl 8)
+        }
+        return 0
     }
 
     /**
@@ -426,31 +490,35 @@ class UsbAudioDevice private constructor(private val context: Context) {
      * @return Pair(altSetting, bitDepth)
      */
     fun findAltSettingForBitDepth(targetBitDepth: Int): Pair<Int, Int> {
-        if (parsedAltSettings.isEmpty()) {
+        // Only PCM alt settings are candidates. A RAW_DATA alt setting is a DSD
+        // bitstream endpoint; sending PCM to it would not be bit-perfect, it
+        // would be wrong.
+        val pcmAlts = parsedAltSettings.filter { !it.isRawData }
+        if (pcmAlts.isEmpty()) {
             val info = cachedDeviceInfo ?: return Pair(1, 16)
             return Pair(info.bestAltSetting, info.bestBitDepth)
         }
 
         // Exact match
-        val exact = parsedAltSettings.firstOrNull { it.second == targetBitDepth }
+        val exact = pcmAlts.firstOrNull { it.bitResolution == targetBitDepth }
         if (exact != null) {
-            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): exact match alt=${exact.first}")
-            return exact
+            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): exact match alt=${exact.altSetting}")
+            return Pair(exact.altSetting, exact.bitResolution)
         }
 
         // Next higher
-        val higher = parsedAltSettings
-                .filter { it.second > targetBitDepth }
-                .minByOrNull { it.second }
+        val higher = pcmAlts
+                .filter { it.bitResolution > targetBitDepth }
+                .minByOrNull { it.bitResolution }
         if (higher != null) {
-            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): next higher alt=${higher.first} bits=${higher.second}")
-            return higher
+            Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): next higher alt=${higher.altSetting} bits=${higher.bitResolution}")
+            return Pair(higher.altSetting, higher.bitResolution)
         }
 
         // Fallback to best
-        val best = parsedAltSettings.maxByOrNull { it.second } ?: Pair(1, 16)
-        Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): fallback to best alt=${best.first} bits=${best.second}")
-        return best
+        val best = pcmAlts.maxByOrNull { it.bitResolution } ?: return Pair(1, 16)
+        Log.i(TAG, "findAltSettingForBitDepth($targetBitDepth): fallback to best alt=${best.altSetting} bits=${best.bitResolution}")
+        return Pair(best.altSetting, best.bitResolution)
     }
 
     /**

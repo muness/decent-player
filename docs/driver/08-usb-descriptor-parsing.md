@@ -152,6 +152,6 @@ Supporting UAC1 would require a separate parsing path. Most modern DACs are UAC2
 
 1. **Multiple Clock Sources** — our parser returns the first one found. DACs with clock selectors may need the CLOCK_SELECTOR entity parsed to find which clock is active.
 
-2. **Alt setting 4 (DSD)** — some DACs report 32-bit for DSD/DoP alt settings. Our parser may select this over the PCM 32-bit alt. The FORMAT_TYPE descriptor's `bFormatType` field should be checked (Type I = PCM, others = special).
+2. **Alt setting 4 (native DSD)** — DACs commonly report a 4-byte subslot and 32-bit resolution for their DSD alt setting, identical to the PCM 32-bit alt. `bFormatType` does **not** separate them: on the Cayin RU7 both are Type I. The discriminator is the AS_GENERAL descriptor's `bmFormats` bitmap — D0 (`0x00000001`) is PCM, D31 (`0x80000000`) is RAW_DATA. The parser now reads `bmFormats` per alt setting and excludes RAW_DATA alts from PCM selection; see [05 — Cayin RU7 Hardware Reference](05-cayin-ru7-hardware-reference.md#bmformats-decode-from-the-hex-dump) for the byte-level decode.
 
 3. **No CLOCK_SOURCE** — UAC1 devices won't have this. The fallback brute-force array is used in that case.

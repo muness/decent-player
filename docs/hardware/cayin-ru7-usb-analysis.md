@@ -19,7 +19,7 @@ Data collected 2026-04-03 while a a direct USB driver was playing via USB.
 | 1 | 1 | 1 (Audio) | 2 (AudioStreaming) | 32 (UAC2) | Playback alt 1 |
 | 1 | 2 | 1 (Audio) | 2 (AudioStreaming) | 32 (UAC2) | Playback alt 2 |
 | 1 | 3 | 1 (Audio) | 2 (AudioStreaming) | 32 (UAC2) | Playback alt 3 |
-| 1 | 4 | 1 (Audio) | 2 (AudioStreaming) | 32 (UAC2) | Playback alt 4 |
+| 1 | 4 | 1 (Audio) | 2 (AudioStreaming) | 32 (UAC2) | Playback alt 4 (RAW_DATA / native DSD) |
 
 ### Endpoints (all alt settings share same structure)
 
@@ -32,7 +32,13 @@ Data collected 2026-04-03 while a a direct USB driver was playing via USB.
 - Attributes=5 → Isochronous, Asynchronous mode (DAC has its own clock, sends feedback)
 - Attributes=17 → Isochronous, Feedback endpoint
 - Max packet size 776 bytes = enough for 32-bit stereo at 384kHz (384000 × 4 bytes × 2ch / 8000 μframes = 384 bytes per μframe, but 776 allows for variable packet sizes)
-- 4 alternate settings likely correspond to different bit depths (16/24/32-bit + possibly DSD)
+- The 4 alternate settings are **not** four bit depths. Alts 1–3 are PCM
+  (AS_GENERAL `bmFormats = 0x00000001`, D0) at 16/24/32-bit; alt 4 is
+  **RAW_DATA** (`bmFormats = 0x80000000`, D31) — the native-DSD alt setting.
+  Alts 3 and 4 share an identical Format Type I descriptor (4-byte subslot,
+  32-bit resolution), so `bmFormats` is the only thing that tells them apart.
+  Full byte-level decode:
+  [05 — Cayin RU7 Hardware Reference](../driver/05-cayin-ru7-hardware-reference.md#bmformats-decode-from-the-hex-dump).
 
 ## HAL-Reported Formats (via getSupportedMixerAttributes API)
 

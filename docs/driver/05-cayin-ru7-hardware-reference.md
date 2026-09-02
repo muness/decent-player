@@ -32,7 +32,7 @@ Configuration 1: bMaxPower=100mA, 2 interfaces
     ├── Alt 1: PCM 16-bit, 2ch stereo
     ├── Alt 2: PCM 24-bit, 2ch stereo
     ├── Alt 3: PCM 32-bit, 2ch stereo
-    └── Alt 4: PCM 32-bit, special (DSD?)
+    └── Alt 4: RAW_DATA (native DSD), 4-byte subslot, 2ch stereo
 ```
 
 ### Clock Source Entity
@@ -48,15 +48,21 @@ Configuration 1: bMaxPower=100mA, 2 interfaces
 
 ### Alt Settings Detail
 
-| Alt | Bit Depth | bSubslotSize | Channels | Channel Config | Format |
-|-----|-----------|-------------|----------|----------------|--------|
-| 0 | — | — | — | — | Zero-bandwidth |
-| 1 | 16-bit | 2 bytes | 2 | 0x03 (L+R) | PCM Type I |
-| 2 | 24-bit | 3 bytes | 2 | 0x03 (L+R) | PCM Type I |
-| 3 | 32-bit | 4 bytes | 2 | 0x03 (L+R) | PCM Type I |
-| 4 | 32-bit | 4 bytes | 2* | 0x03 | SPECIAL (DSD/DoP?) |
+| Alt | bBitResolution | bSubslotSize | Channels | Channel Config | bmFormats | Format |
+|-----|----------------|-------------|----------|----------------|-----------|--------|
+| 0 | — | — | — | — | — | Zero-bandwidth |
+| 1 | 16 | 2 bytes | 2 | 0x03 (L+R) | `0x00000001` | PCM Type I |
+| 2 | 24 | 3 bytes | 2 | 0x03 (L+R) | `0x00000001` | PCM Type I |
+| 3 | 32 | 4 bytes | 2 | 0x03 (L+R) | `0x00000001` | PCM Type I |
+| 4 | 32 | 4 bytes | 2 | 0x03 (L+R) | `0x80000000` | **RAW_DATA (native DSD)** |
 
-*Alt 4 has different bmFormats and may be DSD over PCM (DoP).
+Alt 4 is **not** a fourth PCM setting and **not** DoP. Its AS_GENERAL
+`bmFormats` sets D31 (RAW_DATA), which is how UAC2 advertises an opaque
+bitstream endpoint — the native-DSD alt setting. DoP needs no dedicated alt
+setting at all; it rides inside ordinary PCM frames on alts 1–3.
+
+This is descriptor fact, decoded from the hex dump below. See
+[bmFormats decode](#bmformats-decode-from-the-hex-dump).
 
 ### Endpoints (same for alt 1-4)
 
@@ -143,3 +149,53 @@ The DAC's crystal oscillator has a slight positive offset (~0.003%) which is wel
 000130 01 04 20 07 05 01 05 08 03 01 08 25 01 00 00 00
 000140 00 00 07 05 81 11 04 00 04
 ```
+
+### bmFormats decode (from the hex dump)
+
+Each AudioStreaming alt setting carries a class-specific **AS_GENERAL**
+descriptor (`bLength=0x10`, `bDescriptorType=0x24`, `bDescriptorSubtype=0x01`)
+laid out as:
+
+```
+byte 0  bLength            = 0x10 (16)
+byte 1  bDescriptorType    = 0x24 (CS_INTERFACE)
+byte 2  bDescriptorSubtype = 0x01 (AS_GENERAL)
+byte 3  bTerminalLink
+byte 4  bmControls
+byte 5  bFormatType
+bytes 6-9   bmFormats      (32-bit little-endian bitmap)
+byte 10 bNrChannels
+bytes 11-14 bmChannelConfig
+byte 15 iChannelNames
+```
+
+`bmFormats` bit **D0 = PCM**, bit **D31 = RAW_DATA**.
+
+| Alt | AS_GENERAL bytes | `bmFormats` bytes (LE) | Value | Meaning |
+|-----|------------------|------------------------|-------|---------|
+| 1 | `10 24 01 01 05 01` `01 00 00 00` `02 03 00 00 00 00` | `01 00 00 00` | `0x00000001` | D0 → PCM |
+| 2 | `10 24 01 01 05 01` `01 00 00 00` `02 03 00 00 00 00` | `01 00 00 00` | `0x00000001` | D0 → PCM |
+| 3 | `10 24 01 01 05 01` `01 00 00 00` `02 03 00 00 00 00` | `01 00 00 00` | `0x00000001` | D0 → PCM |
+| 4 | `10 24 01 01 05 01` `00 00 00 80` `02 03 00 00 00 00` | `00 00 00 80` | `0x80000000` | **D31 → RAW_DATA** |
+
+Alt 4's AS_GENERAL begins at offset `0x11d` in the dump: the bytes
+`00 00 00 80` at offsets `0x123`–`0x126` are `bmFormats` little-endian, i.e.
+`0x80000000`.
+
+The paired **Format Type I** descriptor (`06 24 02 …`) gives the wire layout
+for each alt setting:
+
+| Alt | Format Type bytes | bSubslotSize | bBitResolution |
+|-----|-------------------|--------------|----------------|
+| 1 | `06 24 02 01 02 10` | 2 | 0x10 = 16 |
+| 2 | `06 24 02 01 03 18` | 3 | 0x18 = 24 |
+| 3 | `06 24 02 01 04 20` | 4 | 0x20 = 32 |
+| 4 | `06 24 02 01 04 20` | 4 | 0x20 = 32 |
+
+Alts 3 and 4 have **identical** Format Type descriptors. Only `bmFormats`
+distinguishes them, which is why a scan that looks at `bBitResolution` alone
+can mistake the DSD alt setting for a PCM one.
+
+The endpoint descriptor is also the same for every alt setting
+(`07 05 01 05 08 03 01`): address `0x01` OUT, `bmAttributes=0x05`
+(isochronous, asynchronous), `wMaxPacketSize = 0x0308 = 776`, `bInterval=1`.
